@@ -10,30 +10,30 @@ readme = "README.md"
 description = "Authenticated QUIC streams and HTTP over userspace WireGuard"
 
 [dependencies]
-bytes = "1"
+bytes = { version = "1", default-features = false }
 quinn-proto = { version = "0.11.8", default-features = false, features = ["ring"] }
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false }
 boringtun = { version = "0.7.1", default-features = false }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "ring"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
-axum = { version = "0.8", optional = true }
-hyper = { version = "1", features = ["client", "server", "http1"], optional = true }
-hyper-util = { version = "0.1", features = ["tokio", "service"], optional = true }
-http-body-util = { version = "0.1", optional = true }
-base64 = "0.22"
-parking_lot = "0.12"
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
+axum = { version = "0.8", default-features = false, optional = true }
+hyper = { version = "1", default-features = false, features = ["client", "server", "http1"], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"], optional = true }
+http-body-util = { version = "0.1", default-features = false, optional = true }
+base64 = { version = "0.22", default-features = false }
+parking_lot = { version = "0.12", default-features = false }
 
-tokio-util = { version = "0.7", features = ["rt"] }
-ring = "0.17"
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+ring = { version = "0.17", default-features = false }
 
 [features]
 default = ["http"]
 http = ["dep:axum", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 reqwest = { version = "0.13", default-features = false }
-rcgen = "0.14"
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
