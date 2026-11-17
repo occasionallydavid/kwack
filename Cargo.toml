@@ -8,6 +8,8 @@ keywords = ["quic"]
 categories = ["network-programming", "asynchronous"]
 readme = "README.md"
 description = "Authenticated QUIC streams and HTTP over userspace WireGuard"
+documentation = "https://docs.rs/quic_wg"
+repository = "https://github.com/occasionallydavid/quic_wg"
 
 [dependencies]
 bytes = { version = "1", default-features = false }
