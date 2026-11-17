@@ -22,7 +22,7 @@ async fn main() -> Result<(), Error> {
     }
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:4433".into());
     let server = Server::builder(private)
-        .authorized_peers(peers)
+        .authorize(Box::new(move |key| peers.contains(&key)))
         .bind(&bind)
         .await?;
     println!("listening on {}", server.local_addr());

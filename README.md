@@ -8,7 +8,7 @@ rekeys, and QUIC endpoints. No TUN device, OS routes, or root access is needed.
 Axum / HTTP client ↔ HTTP/1.1 ↔ QUIC streams ↔ WireGuard ↔ UDP
 ```
 
-The server has its own private key and an explicit list of authorized client
+The server has its own private key and an authorization callback for client
 public keys. The client supplies its private key and pins the server public key.
 WireGuard provides authentication, encryption, and replay protection. The inner
 QUIC implementation provides reliability, congestion control, and independent
@@ -61,7 +61,7 @@ let router = Router::new().route("/whoami", get(|Extension(peer): Extension<Peer
     peer.public_key().to_string()
 }));
 let server = Server::builder(server_private)
-    .authorized_peers([client_public])
+    .authorize(Box::new(move |key| key == client_public))
     .bind("0.0.0.0:4433")
     .await?;
 let handle = server.handle();
@@ -77,8 +77,17 @@ on every HTTP request. Read it through `request.extensions()` or Axum's
 It is never taken from a header or the network address. Each authorized public key
 has its own virtual QUIC endpoint, so one peer cannot inject QUIC packets into
 another peer's connections. Revocation removes the WireGuard state and closes
-that peer's existing QUIC connections. Adding peers currently requires rebinding
-with a new authorized list.
+that peer's existing QUIC connections and denies it for the server's lifetime.
+
+`authorize(Box::new(|key| ...))` is the only admission interface. The callback runs
+on every WireGuard handshake initiation, including rekeys, and may consult shared
+mutable state to change admission without rebinding. It runs synchronously on
+the UDP dispatcher: use an in-memory lookup, not blocking database or network I/O.
+The callback sees a claimed key before full handshake authentication; peer state
+is installed only after the handshake authenticates. Returning false affects
+subsequent handshakes; call `revoke_peer` to terminate an existing session.
+Without a callback the server denies all peers. New peers are created lazily,
+with at most 65,535 active peers per server.
 
 Use `serve_with_shutdown(router, shutdown_future)` for coordinated shutdown,
 or `accept()` / `Connection::accept_bi()` for a custom application protocol.
@@ -131,7 +140,7 @@ exports return ordinary strings.
 - `source`: original sender address.
 - `local_address`: bound socket address; wildcard binds do not expose the exact destination IP.
 - `reason`: unrecognized traffic, malformed WireGuard, unauthorized peer, unknown
-  session, authentication failure, or invalid inner packet.
+  session, authentication failure, invalid inner packet, or peer capacity reached.
 
 The feed never exposes decrypted application data. It is suitable for inspection
 or mirroring to a separate service. Queue capacity is 256 datagrams; overload

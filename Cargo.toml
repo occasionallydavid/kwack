@@ -33,6 +33,7 @@ client = ["dep:http", "dep:hyper", "hyper/client", "dep:hyper-util"]
 server = ["dep:http", "dep:tower-service", "dep:hyper", "hyper/server", "dep:hyper-util", "hyper-util/service"]
 
 [dev-dependencies]
+blake2 = { version = "0.10", default-features = false }
 http-body-util = { version = "0.1", default-features = false }
 tokio = { version = "1", default-features = false, features = ["io-util", "signal"] }
 axum = { version = "0.8", default-features = false }

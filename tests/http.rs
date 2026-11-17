@@ -22,7 +22,7 @@ async fn axum_streaming_http_uses_authenticated_transport() {
         let client_key = PrivateKey::from_bytes([21; 32]);
         let client_public = client_key.public_key();
         let server = Server::builder(server_key)
-            .authorized_peers([client_public])
+            .authorize(Box::new(move |key| key == client_public))
             .bind("127.0.0.1:0")
             .await
             .unwrap();
@@ -111,7 +111,7 @@ async fn revocation_closes_existing_connections_and_blocks_reconnect() {
         let client_key = PrivateKey::from_bytes([23; 32]);
         let peer = client_key.public_key();
         let server = Server::builder(server_key)
-            .authorized_peers([peer])
+            .authorize(Box::new(move |key| key == peer))
             .bind("127.0.0.1:0")
             .await
             .unwrap();
@@ -209,8 +209,9 @@ async fn tower_service_honors_readiness_and_isolates_peer_identity() {
             PrivateKey::from_bytes([25; 32]),
             PrivateKey::from_bytes([26; 32]),
         ];
+        let public_keys: Vec<_> = keys.iter().map(PrivateKey::public_key).collect();
         let server = Server::builder(server_key)
-            .authorized_peers(keys.iter().map(PrivateKey::public_key))
+            .authorize(Box::new(move |key| public_keys.contains(&key)))
             .bind("127.0.0.1:0")
             .await
             .unwrap();

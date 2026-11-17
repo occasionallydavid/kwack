@@ -18,7 +18,9 @@ async fn authenticated_streams_bind_identity_to_each_peer() {
         let bob = key(3);
         let bob_public = bob.public_key();
         let mut server = Server::builder(server_key)
-            .authorized_peers([alice_public, bob_public])
+            .authorize(Box::new(move |key| {
+                [alice_public, bob_public].contains(&key)
+            }))
             .bind("127.0.0.1:0")
             .await
             .unwrap();
@@ -73,7 +75,7 @@ async fn wrong_key_and_unauthorized_clients_never_connect() {
     let server_key = key(4);
     let public = server_key.public_key();
     let server = Server::builder(server_key)
-        .authorized_peers([key(5).public_key()])
+        .authorize(Box::new(|peer| peer == key(5).public_key()))
         .bind("127.0.0.1:0")
         .await
         .unwrap();
@@ -172,8 +174,8 @@ async fn encrypted_transport_survives_loss_replay_and_udp_roaming() {
 
     use tokio::task::JoinSet;
     tokio::time::timeout(Duration::from_secs(15),async {
-        let server_key=key(30);let public=server_key.public_key();let client_key=key(31);
-        let mut server=Server::builder(server_key).authorized_peers([client_key.public_key()]).bind("127.0.0.1:0").await.unwrap();
+        let server_key=key(30);let public=server_key.public_key();let client_key=key(31);let client_public=client_key.public_key();
+        let mut server=Server::builder(server_key).authorize(Box::new(move |key| key == client_public)).bind("127.0.0.1:0").await.unwrap();
         let server_address=server.local_addr();
         let front=UdpSocket::bind("127.0.0.1:0").await.unwrap();let relay_address=front.local_addr().unwrap();
         let back1=UdpSocket::bind("127.0.0.1:0").await.unwrap();let back2=UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -229,8 +231,9 @@ async fn standard_tls_quic_and_wireguard_quic_share_one_udp_port() {
         let server_key = key(40);
         let public = server_key.public_key();
         let client_key = key(41);
+        let client_public = client_key.public_key();
         let mut server = Server::builder(server_key)
-            .authorized_peers([client_key.public_key()])
+            .authorize(Box::new(move |key| key == client_public))
             .bind("127.0.0.1:0")
             .await
             .unwrap();
@@ -307,4 +310,138 @@ async fn standard_tls_quic_and_wireguard_quic_share_one_udp_port() {
     })
     .await
     .expect("shared QUIC port test timed out");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn authorization_callback_observes_live_policy_changes() {
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, RwLock};
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server_key = key(50);
+        let server_public = server_key.public_key();
+        let alice = key(51).public_key();
+        let bob = key(52).public_key();
+        let policy = Arc::new(RwLock::new(HashSet::new()));
+        let lookup = policy.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let mut count = 0;
+        let mut server = Server::builder(server_key)
+            .authorize(Box::new(move |key| {
+                count += 1;
+                observed.store(count, Ordering::SeqCst);
+                lookup.read().unwrap().contains(&key)
+            }))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = server.local_addr();
+        let handle = server.handle();
+        let task = tokio::spawn(async move {
+            for expected in [alice, bob] {
+                let connection = server.accept().await.unwrap();
+                assert_eq!(connection.peer_identity().public_key(), expected);
+                let mut stream = connection.accept_bi().await.unwrap();
+                let mut byte = [0];
+                stream.read_exact(&mut byte).await.unwrap();
+                stream.write_all(&byte).await.unwrap();
+                stream.shutdown().await.unwrap();
+                connection.closed().await;
+            }
+        });
+        assert!(
+            Client::builder(key(51))
+                .remote(address, server_public)
+                .connect_timeout(Duration::from_millis(150))
+                .connect()
+                .await
+                .is_err()
+        );
+        for (byte, public) in [(51, alice), (52, bob)] {
+            policy.write().unwrap().insert(public);
+            let client = Client::builder(key(byte))
+                .remote(address, server_public)
+                .connect()
+                .await
+                .unwrap();
+            let mut stream = client.connection().open_bi().await.unwrap();
+            stream.write_all(b"x").await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut echoed = [0];
+            stream.read_exact(&mut echoed).await.unwrap();
+            assert_eq!(echoed, [b'x']);
+            client.close().await;
+            policy.write().unwrap().remove(&public);
+            assert!(
+                Client::builder(key(byte))
+                    .remote(address, server_public)
+                    .connect_timeout(Duration::from_millis(150))
+                    .connect()
+                    .await
+                    .is_err()
+            );
+        }
+        task.await.unwrap();
+        assert!(calls.load(Ordering::SeqCst) >= 5);
+        handle.shutdown().await.unwrap();
+    })
+    .await
+    .expect("dynamic admission test timed out");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn no_authorization_callback_denies_every_peer() {
+    let server_key = key(53);
+    let server_public = server_key.public_key();
+    let server = Server::builder(server_key)
+        .bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    assert!(
+        Client::builder(key(54))
+            .remote(server.local_addr(), server_public)
+            .connect_timeout(Duration::from_millis(150))
+            .connect()
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_revocation_closes_connections_even_if_caller_cancels() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server_key = key(55);
+        let server_public = server_key.public_key();
+        let client_key = key(56);
+        let peer = client_key.public_key();
+        let mut server = Server::builder(server_key)
+            .authorize(Box::new(|_| true))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let handle = server.handle();
+        let (client, connection) = tokio::join!(
+            Client::builder(client_key)
+                .remote(server.local_addr(), server_public)
+                .connect(),
+            server.accept()
+        );
+        let _client = client.unwrap();
+        let connection = connection.unwrap();
+        let mut revoke = Box::pin(handle.revoke_peer(peer));
+        poll_fn(|cx| {
+            assert!(revoke.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(revoke);
+        connection.closed().await;
+    })
+    .await
+    .expect("cancelled revocation test timed out");
 }

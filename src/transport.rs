@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,6 +40,7 @@ pub enum RejectionReason {
     UnknownSession,
     AuthenticationFailed,
     InvalidInnerPacket,
+    PeerLimitReached,
 }
 
 /// Original outer UDP bytes; never contains decrypted tunnel payloads.
@@ -60,28 +61,25 @@ struct Peer {
 
 enum Command {
     Revoke(PublicKey, oneshot::Sender<()>),
+    Close(oneshot::Sender<()>),
     Stop,
 }
 
 struct Network {
     local: SocketAddr,
-    endpoints: HashMap<PublicKey, Endpoint>,
+    endpoints: Arc<Mutex<HashMap<PublicKey, Endpoint>>>,
     outgoing: mpsc::Sender<Outbound>,
     command: mpsc::Sender<Command>,
     rejected: Mutex<Option<mpsc::Receiver<RejectedDatagram>>>,
     fallback: Mutex<Option<mpsc::Receiver<Inbound>>>,
     driver: JoinHandle<()>,
-    acceptors: Vec<JoinHandle<()>>,
 }
 impl Drop for Network {
     fn drop(&mut self) {
-        for endpoint in self.endpoints.values() {
+        for endpoint in self.endpoints.lock().values() {
             endpoint.close(0u32.into(), b"shutdown");
         }
         self.driver.abort();
-        for acceptor in &self.acceptors {
-            acceptor.abort();
-        }
     }
 }
 impl Network {
@@ -101,24 +99,27 @@ impl Network {
     }
 }
 
-/// Server configuration. Peers are denied unless explicitly listed.
+type Authorize = Box<dyn FnMut(PublicKey) -> bool + Send>;
+
+/// Server configuration. Peers are denied unless accepted by the callback.
 pub struct ServerBuilder {
     private: PrivateKey,
-    peers: Vec<PublicKey>,
+    authorize: Authorize,
 }
 impl ServerBuilder {
-    pub fn authorized_peers(mut self, peers: impl IntoIterator<Item = PublicKey>) -> Self {
-        self.peers = peers.into_iter().collect();
+    /// Checks each WireGuard handshake initiation, including rekeys.
+    ///
+    /// The callback receives the claimed public key before the handshake has
+    /// fully authenticated. It runs on the UDP dispatcher and must not block.
+    /// Changes affect subsequent handshakes; use `revoke_peer` to close existing
+    /// sessions and deny that key for the rest of this server's lifetime.
+    pub fn authorize(mut self, callback: Box<dyn FnMut(PublicKey) -> bool + Send>) -> Self {
+        self.authorize = callback;
         self
     }
     pub async fn bind(self, address: impl tokio::net::ToSocketAddrs) -> Result<Server, Error> {
         let socket = UdpSocket::bind(address).await?;
-        let (network, incoming) = start(
-            socket,
-            self.private,
-            self.peers.into_iter().map(|key| (key, None)).collect(),
-            false,
-        )?;
+        let (network, incoming) = start(socket, self.private, None, Some(self.authorize))?;
         Ok(Server {
             network,
             incoming,
@@ -139,7 +140,7 @@ impl Server {
     pub fn builder(private: PrivateKey) -> ServerBuilder {
         ServerBuilder {
             private,
-            peers: Vec::new(),
+            authorize: Box::new(|_| false),
         }
     }
     pub fn local_addr(&self) -> SocketAddr {
@@ -187,22 +188,21 @@ pub struct ServerHandle {
     network: Arc<Network>,
 }
 impl ServerHandle {
-    /// Removes the WireGuard state before closing all of this peer's QUIC connections.
+    /// Removes WireGuard state, closes QUIC connections, and denies future admission
+    /// of this key for the rest of the server's lifetime.
     pub async fn revoke_peer(&self, key: PublicKey) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         self.network.command.send(Command::Revoke(key, tx)).await?;
         rx.await?;
-        if let Some(endpoint) = self.network.endpoints.get(&key) {
-            endpoint.close(0u32.into(), b"peer revoked");
-        }
         Ok(())
     }
     pub async fn shutdown(&self) -> Result<(), Error> {
-        for endpoint in self.network.endpoints.values() {
-            endpoint.close(0u32.into(), b"shutdown");
-        }
+        let (tx, rx) = oneshot::channel();
+        self.network.command.send(Command::Close(tx)).await?;
+        rx.await?;
+        let endpoints: Vec<_> = self.network.endpoints.lock().values().cloned().collect();
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            for endpoint in self.network.endpoints.values() {
+            for endpoint in endpoints {
                 endpoint.wait_idle().await;
             }
         })
@@ -246,10 +246,12 @@ impl ClientBuilder {
             }
         });
         let socket = UdpSocket::bind(bind).await?;
-        let (network, _) = start(socket, self.private, vec![(key, Some(address))], true)?;
+        let (network, _) = start(socket, self.private, Some((key, address)), None)?;
         let endpoint = network
             .endpoints
+            .lock()
             .get(&key)
+            .cloned()
             .ok_or_else(|| io::Error::other("missing client endpoint"))?;
         let inner = tokio::time::timeout(
             self.timeout,
@@ -291,12 +293,14 @@ impl Client {
     /// Sends a close and keeps UDP processing alive until Quinn finishes draining.
     pub async fn close(&self) {
         self.connection.close();
-        if let Some(endpoint) = self
+        let endpoint = self
             .connection
             .network
             .endpoints
+            .lock()
             .get(&self.connection.identity.key)
-        {
+            .cloned();
+        if let Some(endpoint) = endpoint {
             endpoint.wait_idle().await;
         }
     }
@@ -394,15 +398,46 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
 }
 
 type Accepted = mpsc::Receiver<(PublicKey, quinn::Incoming)>;
+
+fn peer_endpoint(
+    key: PublicKey,
+    client: bool,
+    outgoing: mpsc::Sender<Outbound>,
+) -> io::Result<(Endpoint, mpsc::Sender<Inbound>)> {
+    let (incoming, rx) = mpsc::channel(QUEUE);
+    let virtual_socket = Arc::new(VirtualSocket {
+        incoming: Mutex::new(rx),
+        outgoing,
+        target: Target::Peer(key),
+        local: socket::VIRTUAL_LOCAL,
+    });
+    let server_config = if client {
+        None
+    } else {
+        let mut config = crate::plaintext::server_config();
+        config.transport_config(transport_config());
+        config.migration(false);
+        Some(config)
+    };
+    let mut endpoint = Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        server_config,
+        virtual_socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
+    let mut config = crate::plaintext::client_config();
+    config.transport_config(transport_config());
+    endpoint.set_default_client_config(config);
+    Ok((endpoint, incoming))
+}
+
 fn start(
     socket: UdpSocket,
     private: PrivateKey,
-    configs: Vec<(PublicKey, Option<SocketAddr>)>,
-    client: bool,
+    remote: Option<(PublicKey, SocketAddr)>,
+    authorize: Option<Authorize>,
 ) -> Result<(Arc<Network>, Accepted), Error> {
-    if configs.len() > 65535 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many peers").into());
-    }
+    let client = remote.is_some();
     let local = socket.local_addr()?;
     let (outgoing, out_rx) = mpsc::channel(QUEUE);
     let (command, cmd_rx) = mpsc::channel(32);
@@ -413,48 +448,9 @@ fn start(
     let limiter = Arc::new(RateLimiter::new(&public, 100));
     let mut peers = HashMap::new();
     let mut indices = HashMap::new();
-    let mut endpoints = HashMap::new();
-    let mut acceptors = Vec::new();
-    for (offset, (key, remote)) in configs.into_iter().enumerate() {
-        if peers.contains_key(&key) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "duplicate peer key").into());
-        }
-        let index = offset as u32 + 1;
-        let (incoming, rx) = mpsc::channel(QUEUE);
-        let virtual_socket = Arc::new(VirtualSocket {
-            incoming: Mutex::new(rx),
-            outgoing: outgoing.clone(),
-            target: Target::Peer(key),
-            local: socket::VIRTUAL_LOCAL,
-        });
-        let server_config = if client {
-            None
-        } else {
-            let mut config = crate::plaintext::server_config();
-            config.transport_config(transport_config());
-            config.migration(false);
-            Some(config)
-        };
-        let mut endpoint = Endpoint::new_with_abstract_socket(
-            quinn::EndpointConfig::default(),
-            server_config,
-            virtual_socket,
-            Arc::new(quinn::TokioRuntime),
-        )?;
-        let mut config = crate::plaintext::client_config();
-        config.transport_config(transport_config());
-        endpoint.set_default_client_config(config);
-        if !client {
-            let listener = endpoint.clone();
-            let accepted = accepted.clone();
-            acceptors.push(tokio::spawn(async move {
-                while let Some(incoming) = listener.accept().await {
-                    if accepted.send((key, incoming)).await.is_err() {
-                        break;
-                    }
-                }
-            }));
-        }
+    let endpoints = Arc::new(Mutex::new(HashMap::new()));
+    if let Some((key, address)) = remote {
+        let (endpoint, incoming) = peer_endpoint(key, true, outgoing.clone())?;
         peers.insert(
             key,
             Peer {
@@ -463,16 +459,18 @@ fn start(
                     x25519::PublicKey::from(key.0),
                     None,
                     Some(25),
-                    index,
+                    1,
                     Some(limiter.clone()),
                 ),
-                remote,
+                remote: Some(address),
                 incoming,
             },
         );
-        indices.insert(index, key);
-        endpoints.insert(key, endpoint);
+        indices.insert(1, key);
+        endpoints.lock().insert(key, endpoint);
     }
+    let driver_endpoints = endpoints.clone();
+    let driver_outgoing = outgoing.clone();
     let driver = tokio::spawn(async move {
         let mut dispatcher = Dispatcher {
             socket,
@@ -485,6 +483,14 @@ fn start(
             fallback,
             local,
             client,
+            authorize,
+            endpoints: driver_endpoints,
+            outgoing: driver_outgoing,
+            accepted,
+            acceptors: JoinSet::new(),
+            revoked: HashSet::new(),
+            next_index: 2,
+            closing: false,
         };
         if let Err(error) = dispatcher.run(out_rx, cmd_rx).await {
             tracing::error!(%error,"WireGuard UDP driver stopped");
@@ -499,7 +505,6 @@ fn start(
             rejected: Mutex::new(Some(rejected_rx)),
             fallback: Mutex::new(Some(fallback_rx)),
             driver,
-            acceptors,
         }),
         accepted_rx,
     ))
@@ -516,6 +521,14 @@ struct Dispatcher {
     fallback: mpsc::Sender<Inbound>,
     local: SocketAddr,
     client: bool,
+    authorize: Option<Authorize>,
+    endpoints: Arc<Mutex<HashMap<PublicKey, Endpoint>>>,
+    outgoing: mpsc::Sender<Outbound>,
+    accepted: mpsc::Sender<(PublicKey, quinn::Incoming)>,
+    acceptors: JoinSet<()>,
+    revoked: HashSet<PublicKey>,
+    next_index: u32,
+    closing: bool,
 }
 impl Dispatcher {
     async fn run(
@@ -530,8 +543,26 @@ impl Dispatcher {
         loop {
             tokio::select! {
                 command=commands.recv()=>match command {
-                    Some(Command::Revoke(key,ack))=>{self.peers.remove(&key);self.indices.retain(|_,v|*v!=key);let _=ack.send(());}
+                    Some(Command::Revoke(key,ack))=>{
+                        self.revoked.insert(key);
+                        self.peers.remove(&key);
+                        self.indices.retain(|_,v|*v!=key);
+                        if let Some(endpoint)=self.endpoints.lock().remove(&key) {
+                            endpoint.close(0u32.into(),b"peer revoked");
+                        }
+                        let _=ack.send(());
+                    }
+                    Some(Command::Close(ack))=>{
+                        self.closing=true;
+                        for endpoint in self.endpoints.lock().values() {
+                            endpoint.close(0u32.into(),b"shutdown");
+                        }
+                        let _=ack.send(());
+                    }
                     Some(Command::Stop)|None=>return Ok(()),
+                },
+                Some(result)=self.acceptors.join_next(), if !self.acceptors.is_empty()=>{
+                    if let Err(error)=result {tracing::debug!(%error,"QUIC acceptor stopped");}
                 },
                 Some(out)=outgoing.recv()=>{
                     match out.target {
@@ -566,7 +597,7 @@ impl Dispatcher {
             }
         }
     }
-    async fn send(&self, data: &[u8], destination: SocketAddr) {
+    async fn send(&mut self, data: &[u8], destination: SocketAddr) {
         if let Err(error) = self.socket.send_to(data, destination).await {
             tracing::debug!(%error,"UDP send failed");
         }
@@ -586,6 +617,61 @@ impl Dispatcher {
             reason,
         });
     }
+    async fn admit(&mut self, key: PublicKey, data: &[u8], source: SocketAddr, scratch: &mut [u8]) {
+        if self.peers.len() >= 65535 || self.next_index > 0x00ff_ffff {
+            self.reject(data, source, RejectionReason::PeerLimitReached);
+            return;
+        }
+        let index = self.next_index;
+        let mut tunnel = Tunn::new(
+            self.private.secret(),
+            x25519::PublicKey::from(key.0),
+            None,
+            Some(25),
+            index,
+            Some(self.limiter.clone()),
+        );
+        let reply = match tunnel.decapsulate(Some(source.ip()), data, scratch) {
+            TunnResult::WriteToNetwork(reply) if reply.starts_with(&[2, 0, 0, 0]) => reply.to_vec(),
+            TunnResult::WriteToNetwork(reply) => {
+                self.send(reply, source).await;
+                return;
+            }
+            _ => {
+                self.reject(data, source, RejectionReason::AuthenticationFailed);
+                return;
+            }
+        };
+        let (endpoint, incoming) = match peer_endpoint(key, false, self.outgoing.clone()) {
+            Ok(peer) => peer,
+            Err(error) => {
+                tracing::error!(%error, %key, "could not create peer endpoint");
+                return;
+            }
+        };
+        let listener = endpoint.clone();
+        let accepted = self.accepted.clone();
+        self.acceptors.spawn(async move {
+            while let Some(incoming) = listener.accept().await {
+                if accepted.send((key, incoming)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        self.endpoints.lock().insert(key, endpoint);
+        self.peers.insert(
+            key,
+            Peer {
+                tunnel,
+                remote: None,
+                incoming,
+            },
+        );
+        self.indices.insert(index, key);
+        self.next_index += 1;
+        self.send(&reply, source).await;
+    }
+
     async fn receive(&mut self, data: &[u8], source: SocketAddr, scratch: &mut [u8]) {
         if data.len() < 4 || !matches!(&data[..4], [1..=4, 0, 0, 0]) {
             self.reject(data, source, RejectionReason::NonWireGuard);
@@ -607,6 +693,7 @@ impl Dispatcher {
             }
         };
         let is_data = matches!(&packet, Packet::PacketData(_));
+        let is_init = matches!(&packet, Packet::HandshakeInit(_));
         let key = match packet {
             Packet::HandshakeInit(init) => {
                 match parse_handshake_anon(&self.private.secret(), &self.public, &init) {
@@ -639,6 +726,22 @@ impl Dispatcher {
                 }
             },
         };
+        if is_init && !self.client {
+            if self.closing
+                || self.revoked.contains(&key)
+                || !self
+                    .authorize
+                    .as_mut()
+                    .is_some_and(|authorize| authorize(key))
+            {
+                self.reject(data, source, RejectionReason::UnauthorizedPeer);
+                return;
+            }
+            if !self.peers.contains_key(&key) {
+                self.admit(key, data, source, scratch).await;
+                return;
+            }
+        }
         let Some(peer) = self.peers.get_mut(&key) else {
             self.reject(data, source, RejectionReason::UnauthorizedPeer);
             return;
@@ -685,5 +788,58 @@ impl Dispatcher {
         for reply in replies {
             self.send(&reply, source).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use blake2::digest::Mac;
+    use blake2::digest::consts::U16;
+    use blake2::{Blake2s256, Blake2sMac, Digest};
+
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn claimed_key_does_not_allocate_peer_before_authentication() {
+        let server_key = PrivateKey::from_bytes([70; 32]);
+        let server_public = server_key.public_key();
+        let claimed = PrivateKey::from_bytes([71; 32]).public_key();
+        let server = Server::builder(server_key)
+            .authorize(Box::new(move |key| key == claimed))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        assert!(server.network.endpoints.lock().is_empty());
+        let mut rejected = server.take_rejected().unwrap();
+        let mut initiator = Tunn::new(
+            x25519::StaticSecret::from([71; 32]),
+            x25519::PublicKey::from(*server_public.as_bytes()),
+            None,
+            None,
+            1,
+            None,
+        );
+        let mut scratch = [0; 2048];
+        let init = match initiator.format_handshake_initiation(&mut scratch, false) {
+            TunnResult::WriteToNetwork(init) => init,
+            _ => panic!("expected a handshake initiation"),
+        };
+        // Corrupt the encrypted timestamp while preserving the encrypted identity.
+        // MAC1 uses public information, so a valid MAC alone cannot authenticate it.
+        init[88] ^= 1;
+        let mut key = Blake2s256::new();
+        Digest::update(&mut key, b"mac1----");
+        Digest::update(&mut key, server_public.as_bytes());
+        let mut mac = <Blake2sMac<U16> as Mac>::new_from_slice(&key.finalize()).unwrap();
+        Mac::update(&mut mac, &init[..116]);
+        init[116..132].copy_from_slice(&mac.finalize().into_bytes());
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        udp.send_to(init, server.local_addr()).await.unwrap();
+        let rejection = tokio::time::timeout(Duration::from_secs(1), rejected.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rejection.reason, RejectionReason::AuthenticationFailed);
+        assert!(server.network.endpoints.lock().is_empty());
     }
 }
