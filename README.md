@@ -53,12 +53,17 @@ cargo run --example reqwest -- "$CLIENT_PRIVATE" 127.0.0.1:4433 "$SERVER_PUBLIC"
 
 ## Server API
 
+`serve(service)` accepts a cloneable Tower `Service<Request<hyper::body::Incoming>>`
+returning an HTTP response with any sendable body. Axum routers work directly;
+plain handlers can use `tower::service_fn`. Axum is only a development dependency
+for this crate's examples and tests.
+
 ```rust,no_run
-use axum::{Router, routing::get};
+use axum::{Extension, Router, routing::get};
 use wireguard_quic::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
 
 # async fn example(server_private: PrivateKey, client_public: PublicKey) -> Result<(), Error> {
-let router = Router::new().route("/whoami", get(|peer: PeerIdentity| async move {
+let router = Router::new().route("/whoami", get(|Extension(peer): Extension<PeerIdentity>| async move {
     peer.public_key().to_string()
 }));
 let server = Server::builder(server_private)
@@ -67,19 +72,21 @@ let server = Server::builder(server_private)
     .await?;
 let handle = server.handle();
 // handle.revoke_peer(client_public).await?;
-server.serve_axum(router).await?;
+server.serve(router).await?;
 # Ok(())
 # }
 ```
 
-`PeerIdentity` is inserted from the authenticated transport on every HTTP request.
+`PeerIdentity` is inserted into request extensions from the authenticated transport
+on every HTTP request. Read it through `request.extensions()` or Axum's
+`Extension<PeerIdentity>` extractor.
 It is never taken from a header or the network address. Each authorized public key
 has its own virtual QUIC endpoint, so one peer cannot inject QUIC packets into
 another peer's connections. Revocation removes the WireGuard state and closes
 that peer's existing QUIC connections. Adding peers currently requires rebinding
 with a new authorized list.
 
-Use `serve_axum_with_shutdown(router, shutdown_future)` for coordinated shutdown,
+Use `serve_with_shutdown(router, shutdown_future)` for coordinated shutdown,
 or `accept()` / `Connection::accept_bi()` for a custom application protocol.
 Streams implement Tokio's `AsyncRead` and `AsyncWrite`. Handshakes are accepted
 concurrently with a bound on outstanding accept tasks.
@@ -172,8 +179,8 @@ not provide the inner QUIC/HTTP application endpoint.
 
 ## Features and validation
 
-The default `http` feature includes Axum, Hyper, and the reqwest-compatible
-loopback bridge. Disable defaults to use only authenticated streams:
+The default `http` feature includes generic Tower service support, Hyper, and the
+reqwest-compatible loopback bridge. Disable defaults to use only authenticated streams:
 
 ```toml
 wireguard-quic = { version = "0.5", default-features = false }

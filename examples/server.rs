@@ -1,7 +1,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-use axum::Router;
 use axum::body::Bytes;
 use axum::routing::{get, post};
+use axum::{Extension, Router};
 use wireguard_quic::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
 
 #[tokio::main]
@@ -38,11 +38,13 @@ async fn main() -> Result<(), Error> {
         .route("/", get(|| async { "hello over WireGuard–QUIC\n" }))
         .route(
             "/whoami",
-            get(|peer: PeerIdentity| async move { format!("{}\n", peer.public_key()) }),
+            get(|Extension(peer): Extension<PeerIdentity>| async move {
+                format!("{}\n", peer.public_key())
+            }),
         )
         .route("/echo", post(|body: Bytes| async move { body }));
     let result = server
-        .serve_axum_with_shutdown(router, async {
+        .serve_with_shutdown(router, async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await;
