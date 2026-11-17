@@ -24,6 +24,7 @@ jobs:
         if: matrix.target == 'i686-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib
       - run: cargo fmt --check
+      - run: cargo check --no-default-features --lib --target ${{ matrix.target }}
       - run: cargo check --lib --target ${{ matrix.target }}
       - run: cargo test --all-targets --target ${{ matrix.target }}
       - run: cargo test --doc --target ${{ matrix.target }}

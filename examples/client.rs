@@ -1,30 +1,27 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-
-use tracing::info;
-use tracing_subscriber::EnvFilter;
+use wireguard_quic::{Client, Error, PrivateKey};
+use zeroize::Zeroizing;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init()?;
-
-    let client = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
-    let conn = client
-        .connect_with(
-            quinn_plaintext::client_config(),
-            "127.0.0.1:1337".parse()?,
-            "plaintext.test",
-        )?
+async fn main() -> Result<(), Error> {
+    let mut args = std::env::args().skip(1);
+    let file = args
+        .next()
+        .ok_or("usage: client PRIVATE_KEY_FILE SERVER_ADDRESS SERVER_PUBLIC_KEY [PATH]")?;
+    let private: PrivateKey = Zeroizing::new(std::fs::read_to_string(file)?).parse()?;
+    let address = args.next().ok_or("missing server address")?.parse()?;
+    let public = args.next().ok_or("missing server public key")?.parse()?;
+    let path = args.next().unwrap_or_else(|| "/whoami".into());
+    let client = Client::builder(private)
+        .remote(address, public)
+        .connect()
         .await?;
-
-    let mut send = conn.open_uni().await?;
-    send.write_all(b"hello world").await?;
-    send.finish()?;
-    send.stopped().await?;
-    info!("message delivered");
-
-    conn.close(0u32.into(), b"done");
-    client.wait_idle().await;
+    println!(
+        "authenticated server: {}",
+        client.peer_identity().public_key()
+    );
+    let response = client.http().get(&path).send().await?;
+    println!("{}\n{}", response.status(), response.text().await?);
+    client.close().await;
     Ok(())
 }

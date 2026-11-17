@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- (BREAKING) Rename the crate to `wireguard-quic` and make bare plaintext QUIC configuration private.
+- Add mandatory BoringTun authentication/encryption around QUIC with userspace IP/UDP envelopes; no TUN device is needed.
+- Add server/client builders, authorized public keys, server key pinning, authenticated peer identity, and revocation.
+- Isolate peers in separate internal QUIC endpoints; support encrypted endpoint roaming.
+- Drive WireGuard handshake retries, keepalives, and rekeys from a managed UDP dispatcher.
+- Add Axum serving with a peer identity extractor, streaming HTTP client, and an unmodified reqwest/ureq loopback bridge.
+- Expose rejected outer UDP datagrams and a same-port fallback socket for ordinary QUIC services.
+- Add key generation, server, native client, and reqwest examples.
+- Add integration tests for loss, replay, roaming, wire encryption, authorization, identity, revocation, HTTP, and shared-port TLS QUIC.
+
 ## 0.4.0
 
 - Reject malformed transport parameters with a transport error instead of panicking.

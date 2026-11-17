@@ -1,38 +1,54 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-
-use std::time::Duration;
-use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
-
-type Error = Box<dyn std::error::Error + Send + Sync>;
+use axum::{
+    body::Bytes,
+    routing::{get, post},
+    Router,
+};
+use wireguard_quic::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
+use zeroize::Zeroizing;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init()?;
-
-    let server =
-        quinn::Endpoint::server(quinn_plaintext::server_config(), "127.0.0.1:1337".parse()?)?;
-    info!(address = %server.local_addr()?, "listening");
-    while let Some(incoming) = server.accept().await {
-        tokio::spawn(async move {
-            match tokio::time::timeout(Duration::from_secs(30), receive(incoming)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => warn!(%error, "connection failed"),
-                Err(_) => warn!("connection timed out"),
-            }
-        });
+    let mut args = std::env::args().skip(1);
+    let file = args
+        .next()
+        .ok_or("usage: server PRIVATE_KEY_FILE AUTHORIZED_PUBLIC_KEY [MORE_KEYS...]")?;
+    let private: PrivateKey = Zeroizing::new(std::fs::read_to_string(file)?).parse()?;
+    let peers = args
+        .map(|key| key.parse::<PublicKey>())
+        .collect::<Result<Vec<_>, _>>()?;
+    if peers.is_empty() {
+        return Err("provide at least one authorized client public key".into());
     }
-    Ok(())
-}
-
-async fn receive(incoming: quinn::Incoming) -> Result<(), Error> {
-    let conn = incoming.await?;
-    let mut recv = conn.accept_uni().await?;
-    let message = recv.read_to_end(64 * 1024).await?;
-    info!(message = %String::from_utf8_lossy(&message), "received message");
-    // Keep the connection alive until the sender has received acknowledgements.
-    conn.closed().await;
-    Ok(())
+    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:4433".into());
+    let server = Server::builder(private)
+        .authorized_peers(peers)
+        .bind(&bind)
+        .await?;
+    println!("listening on {}", server.local_addr());
+    let mut rejected = server
+        .take_rejected()
+        .ok_or("rejection receiver already taken")?;
+    let observer = tokio::spawn(async move {
+        while let Some(packet) = rejected.recv().await {
+            tracing::debug!(source=%packet.source,reason=?packet.reason,bytes=packet.data.len(),"rejected UDP datagram");
+        }
+    });
+    let router = Router::new()
+        .route("/", get(|| async { "hello over WireGuard–QUIC\n" }))
+        .route(
+            "/whoami",
+            get(|peer: PeerIdentity| async move { format!("{}\n", peer.public_key()) }),
+        )
+        .route("/echo", post(|body: Bytes| async move { body }));
+    let result = server
+        .serve_axum_with_shutdown(router, async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
+    observer.abort();
+    result
 }
