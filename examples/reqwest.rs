@@ -5,10 +5,11 @@ use zeroize::Zeroizing;
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let mut args = std::env::args().skip(1);
-    let file = args
-        .next()
-        .ok_or("usage: reqwest PRIVATE_KEY_FILE SERVER_ADDRESS SERVER_PUBLIC_KEY")?;
-    let private: PrivateKey = Zeroizing::new(std::fs::read_to_string(file)?).parse()?;
+    let encoded_private = Zeroizing::new(
+        args.next()
+            .ok_or("usage: reqwest PRIVATE_KEY SERVER_ADDRESS SERVER_PUBLIC_KEY")?,
+    );
+    let private: PrivateKey = encoded_private.parse()?;
     let address = args.next().ok_or("missing server address")?.parse()?;
     let public = args.next().ok_or("missing server public key")?.parse()?;
     let transport = Client::builder(private)

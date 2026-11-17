@@ -16,25 +16,27 @@ streams. Plaintext QUIC configuration is private to the crate.
 
 ## Run the examples
 
-Generate keys once. Each command writes a new private-key file and prints only
-its public key; existing files are never overwritten. On Unix, files use mode 0600.
+The examples take base64 private keys directly as command-line arguments.
+Generate key pairs into shell variables (Bash); `keygen` prints the private and
+public key on one line, separated by a space:
 
 ```sh
-SERVER_PUBLIC=$(cargo run --quiet --example keygen -- /tmp/wgquic-server.key)
-CLIENT_PUBLIC=$(cargo run --quiet --example keygen -- /tmp/wgquic-client.key)
+read -r SERVER_PRIVATE SERVER_PUBLIC < <(cargo run --quiet --example keygen)
+read -r CLIENT_PRIVATE CLIENT_PUBLIC < <(cargo run --quiet --example keygen)
 printf 'Server public key: %s\nClient public key: %s\n' "$SERVER_PUBLIC" "$CLIENT_PUBLIC"
 ```
 
 Start the Axum server in one terminal:
 
 ```sh
-cargo run --example server -- /tmp/wgquic-server.key "$CLIENT_PUBLIC"
+cargo run --example server -- "$SERVER_PRIVATE" "$CLIENT_PUBLIC"
 ```
 
-In another terminal, supply the server's printed public key:
+In another terminal, set the client private key and server public key variables
+to their generated values, then run:
 
 ```sh
-cargo run --example client -- /tmp/wgquic-client.key 127.0.0.1:4433 "$SERVER_PUBLIC" /whoami
+cargo run --example client -- "$CLIENT_PRIVATE" 127.0.0.1:4433 "$SERVER_PUBLIC" /whoami
 ```
 
 `/whoami` returns the authenticated **client public key**. `/` returns a greeting,
@@ -45,7 +47,7 @@ shuts down the example server.
 There is also an example using an actual, unmodified reqwest client:
 
 ```sh
-cargo run --example reqwest -- /tmp/wgquic-client.key 127.0.0.1:4433 "$SERVER_PUBLIC"
+cargo run --example reqwest -- "$CLIENT_PRIVATE" 127.0.0.1:4433 "$SERVER_PUBLIC"
 ```
 
 ## Server API

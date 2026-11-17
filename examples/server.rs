@@ -13,10 +13,11 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init()?;
     let mut args = std::env::args().skip(1);
-    let file = args
-        .next()
-        .ok_or("usage: server PRIVATE_KEY_FILE AUTHORIZED_PUBLIC_KEY [MORE_KEYS...]")?;
-    let private: PrivateKey = Zeroizing::new(std::fs::read_to_string(file)?).parse()?;
+    let encoded_private = Zeroizing::new(
+        args.next()
+            .ok_or("usage: server PRIVATE_KEY AUTHORIZED_PUBLIC_KEY [MORE_KEYS...]")?,
+    );
+    let private: PrivateKey = encoded_private.parse()?;
     let peers = args
         .map(|key| key.parse::<PublicKey>())
         .collect::<Result<Vec<_>, _>>()?;
