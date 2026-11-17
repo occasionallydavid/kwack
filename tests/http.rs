@@ -15,6 +15,51 @@ use tokio::task::JoinSet;
 use tower_service::Service;
 
 #[tokio::test(flavor = "current_thread")]
+async fn closing_after_one_request_does_not_wait_for_quic_draining() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server_key = PrivateKey::from_bytes([92; 32]);
+        let server_public = server_key.public_key();
+        let server = Server::builder(server_key)
+            .authorize(Box::new(|_| true))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = server.local_addr();
+        let mut tasks = JoinSet::new();
+        tasks.spawn(server.serve(Router::new().route("/", get(|| async { "ok" }))));
+        let client = Client::builder(PrivateKey::from_bytes([93; 32]))
+            .remote(address, server_public)
+            .connect()
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "test")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let response = client.send(request).await.unwrap();
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "ok"
+        );
+
+        // Poll once: closing must finish without waiting for packets or timers.
+        let mut close = std::pin::pin!(client.close());
+        std::future::poll_fn(|cx| {
+            assert!(
+                close.as_mut().poll(cx).is_ready(),
+                "client close waited for QUIC draining"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        client.connection().closed().await;
+    })
+    .await
+    .expect("single-request close test timed out");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn axum_streaming_http_uses_authenticated_transport() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let server_key = PrivateKey::from_bytes([20; 32]);

@@ -161,8 +161,10 @@ connection and 2 MiB total pending-connection buffering.
 
 Dropped streams keep the transport alive for up to five seconds while queued
 data is acknowledged. Final transport teardown also allows up to five seconds
-for QUIC connection-close packets to drain. This requires a running Tokio runtime;
-explicitly close clients before shutting the runtime down.
+for QUIC connection-close packets to drain. Both drains run in the background
+while the Tokio runtime is running. `client.close().await` initiates closure and
+returns immediately, without waiting for the QUIC close timer or pending stream
+acknowledgements. Runtime shutdown may interrupt background draining.
 
 This package replaces the former `quinn-plaintext` public API and does not
 interoperate directly with stock TLS QUIC clients. Ordinary QUIC uses the

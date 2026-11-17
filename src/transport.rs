@@ -92,6 +92,9 @@ impl Drop for Network {
         }
         let abort = self.driver.abort_handle();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // The dispatcher exits when its command channel closes. Keep it open
+            // until close packets have drained, even after Network is dropped.
+            let command = self.command.clone();
             runtime.spawn(async move {
                 let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
                     for endpoint in endpoints {
@@ -100,6 +103,7 @@ impl Drop for Network {
                 })
                 .await;
                 abort.abort();
+                drop(command);
             });
         } else {
             abort.abort();
@@ -314,19 +318,12 @@ impl Client {
     pub fn local_addr(&self) -> SocketAddr {
         self.connection.network.local
     }
-    /// Sends a close and keeps UDP processing alive until Quinn finishes draining.
+    /// Initiates connection closure and returns immediately.
+    ///
+    /// Close packets drain in the background while the Tokio runtime is running.
+    /// This does not wait for pending stream data to be acknowledged.
     pub async fn close(&self) {
         self.connection.close();
-        let endpoint = self
-            .connection
-            .network
-            .endpoints
-            .lock()
-            .get(&self.connection.identity.key)
-            .cloned();
-        if let Some(endpoint) = endpoint {
-            endpoint.wait_idle().await;
-        }
     }
 }
 
