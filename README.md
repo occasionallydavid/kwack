@@ -88,24 +88,36 @@ concurrently with a bound on outstanding accept tasks.
 ## Client API
 
 ```rust,no_run
+use bytes::Bytes;
+use http::Request;
+use http_body_util::{BodyExt, Empty};
 use quic_wg::{Client, Error, PrivateKey, PublicKey};
 # async fn example(private: PrivateKey, server_key: PublicKey) -> Result<(), Error> {
 let client = Client::builder(private)
     .remote("127.0.0.1:4433".parse()?, server_key)
     .connect().await?;
-let response = client.http().get("/whoami").send().await?;
-println!("{}", response.text().await?);
+let request = Request::builder()
+    .uri("/whoami")
+    .header("host", "my-service")
+    .body(Empty::<Bytes>::new())?;
+let response = client.send(request).await?;
+let body = response.into_body().collect().await?.to_bytes();
+println!("{}", String::from_utf8(body.to_vec())?);
 client.close().await;
 # Ok(())
 # }
 ```
 
-Requests use origin-relative paths and stay on the pinned peer. Each request
-opens a QUIC stream on the existing connection. `HttpClient::execute()` accepts
-streaming HTTP bodies; `Response::into_inner()` exposes the streaming Hyper
-response. Convenience body collection is limited to 8 MiB and a configurable
-read timeout. `bytes_with_limit()` overrides the buffering limit. HTTP/1.1 runs
-directly over QUIC streams; this is not standard TLS HTTP/3.
+`Client::send()` accepts `http::Request<B>` with a streaming body and returns
+`http::Response<hyper::body::Incoming>`. Set headers and HTTP routing metadata
+such as `Host` using the standard request builder. Requests use origin-relative
+paths and stay on the pinned peer. Each request opens a QUIC stream on the
+existing connection and sets `Connection: close` for that stream.
+
+Callers control timeouts and body collection, including buffering limits;
+`http-body-util` supplies standard body utilities. The client example bounds
+both request time and response size. HTTP/1.1 runs directly over QUIC streams;
+this is not standard TLS HTTP/3.
 
 Keys parse from WireGuard's standard base64 format. `PrivateKey::generate()` uses
 an OS-backed cryptographic RNG. Private-key debug output is redacted. Keys use ordinary byte arrays and base64

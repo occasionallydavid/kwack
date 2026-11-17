@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use bytes::Bytes;
 use http::{Request, Response};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use quic_wg::{Client, Error, PeerIdentity, PrivateKey, Server};
 use tokio::task::JoinSet;
@@ -43,47 +43,59 @@ async fn axum_streaming_http_uses_authenticated_transport() {
             .connect()
             .await
             .unwrap();
+        let request = Request::builder()
+            .uri("/whoami")
+            .header("host", "identity-service")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let response = client.send(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
         assert_eq!(
-            client
-                .http()
-                .get("/whoami")
-                .send()
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap(),
+            response.into_body().collect().await.unwrap().to_bytes(),
             client_public.to_string()
         );
         let body = vec![0x5a; 128 * 1024];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .header("host", "echo-service")
+            .body(Full::new(Bytes::from(body.clone())))
+            .unwrap();
+        let response = client.send(request).await.unwrap();
         assert_eq!(
-            &client
-                .http()
-                .post("/echo")
-                .body(body.clone())
-                .send()
+            response
+                .into_body()
+                .collect()
                 .await
                 .unwrap()
-                .bytes()
-                .await
-                .unwrap()[..],
+                .to_bytes()
+                .as_ref(),
             body
         );
         for _ in 0..5 {
-            let http = client.http();
-            tasks.spawn(async move { http.get("/whoami").send().await.map(|_| ()) });
+            let client = client.clone();
+            tasks.spawn(async move {
+                let request = Request::builder()
+                    .uri("/whoami")
+                    .header("host", "identity-service")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+                let response = client.send(request).await?;
+                let body = response.into_body().collect().await?.to_bytes();
+                assert_eq!(body, client_public.to_string());
+                Ok::<_, Error>(())
+            });
         }
         for _ in 0..5 {
-            assert!(tasks.join_next().await.unwrap().unwrap().is_ok());
+            tasks.join_next().await.unwrap().unwrap().unwrap();
         }
-        assert!(
-            client
-                .http()
-                .get("http://example.com/")
-                .send()
-                .await
-                .is_err()
-        );
+        for uri in ["http://example.com/", "example.com:443", "*"] {
+            let request = Request::builder()
+                .uri(uri)
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            assert!(client.send(request).await.is_err());
+        }
         client.close().await;
         handle.shutdown().await.unwrap();
     })
@@ -118,30 +130,28 @@ async fn revocation_closes_existing_connections_and_blocks_reconnect() {
             .connect()
             .await
             .unwrap();
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "service")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let response = client.send(request).await.unwrap();
         assert_eq!(
-            client
-                .http()
-                .get("/")
-                .send()
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap(),
+            response.into_body().collect().await.unwrap().to_bytes(),
             "ok"
         );
         handle.revoke_peer(peer).await.unwrap();
-        // The remote can only learn revocation by closure or timeout; the server must
-        // immediately cease servicing requests regardless of notification delivery.
-        assert!(
-            client
-                .http()
-                .timeout(Duration::from_millis(300))
-                .get("/")
-                .send()
-                .await
-                .is_err()
-        );
+        // The server must stop serving revoked peers immediately; the remote
+        // learns revocation through closure or a caller-controlled timeout.
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "service")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        assert!(!matches!(
+            tokio::time::timeout(Duration::from_millis(300), client.send(request)).await,
+            Ok(Ok(_))
+        ));
         assert!(
             Client::builder(PrivateKey::from_bytes([23; 32]))
                 .remote(address, public)
@@ -180,9 +190,11 @@ impl Service<Request<Incoming>> for EchoService {
         assert!(std::mem::replace(&mut self.ready, false));
         Box::pin(async move {
             let peer = *request.extensions().get::<PeerIdentity>().unwrap();
+            let host = request.headers()["host"].clone();
             let body = request.into_body().collect().await?.to_bytes();
             Ok(Response::builder()
                 .header("x-peer-key", peer.public_key().to_string())
+                .header("x-request-host", host)
                 .body(Full::new(body))?)
         })
     }
@@ -217,16 +229,36 @@ async fn tower_service_honors_readiness_and_isolates_peer_identity() {
                     .await
                     .unwrap();
                 for body in [Vec::new(), vec![0xa5; 128 * 1024]] {
-                    let response = client
-                        .http()
-                        .post("/echo")
+                    let request = Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("host", "echo-service")
                         .header("x-peer-key", "untrusted identity")
-                        .body(body.clone())
-                        .send()
-                        .await
+                        .body(Full::new(std::io::Cursor::new(body.clone())))
                         .unwrap();
+                    let response = client.send(request).await.unwrap();
                     assert_eq!(response.headers()["x-peer-key"], peer.to_string());
-                    assert_eq!(response.bytes().await.unwrap().as_ref(), body);
+                    assert_eq!(response.headers()["x-request-host"], "echo-service");
+                    // Feed the streaming response directly into a second request.
+                    let request = Request::builder()
+                        .method("POST")
+                        .uri("/echo")
+                        .header("host", "echo-service")
+                        .body(response.into_body())
+                        .unwrap();
+                    let response = client.send(request).await.unwrap();
+                    assert_eq!(response.headers()["x-peer-key"], peer.to_string());
+                    assert_eq!(response.headers()["x-request-host"], "echo-service");
+                    assert_eq!(
+                        response
+                            .into_body()
+                            .collect()
+                            .await
+                            .unwrap()
+                            .to_bytes()
+                            .as_ref(),
+                        body
+                    );
                 }
                 client.close().await;
             });

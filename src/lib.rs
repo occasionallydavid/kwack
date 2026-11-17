@@ -12,8 +12,6 @@ mod server;
 mod socket;
 mod transport;
 
-#[cfg(feature = "client")]
-pub use client::{HttpClient, RequestBuilder, Response};
 pub use keys::{PrivateKey, PublicKey};
 pub use transport::{
     Client, ClientBuilder, Connection, PeerIdentity, RejectedDatagram, RejectionReason, Server,
