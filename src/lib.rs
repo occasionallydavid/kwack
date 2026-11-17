@@ -1,5 +1,4 @@
-#![cfg_attr(feature = "http", doc = include_str!("../README.md"))]
-//! QUIC streams authenticated and encrypted by a userspace WireGuard transport.
+#![doc = include_str!("lib.md")]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 #[cfg(feature = "client")]
