@@ -3,17 +3,17 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 #[cfg(feature = "client")]
-mod http_client;
-#[cfg(feature = "server")]
-mod http_server;
+mod client;
 mod keys;
 mod packet;
 mod plaintext;
+#[cfg(feature = "server")]
+mod server;
 mod socket;
 mod transport;
 
 #[cfg(feature = "client")]
-pub use http_client::{HttpClient, RequestBuilder, Response};
+pub use client::{HttpClient, RequestBuilder, Response};
 pub use keys::{PrivateKey, PublicKey};
 pub use transport::{
     Client, ClientBuilder, Connection, PeerIdentity, RejectedDatagram, RejectionReason, Server,
