@@ -1,35 +1,30 @@
-use std::time::Duration;
+#![deny(clippy::unwrap_used, clippy::expect_used)]
 
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
-        .init();
+        .try_init()?;
 
-    let client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap())
-        .expect("could not create endpoint client");
-
+    let client = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
     let conn = client
         .connect_with(
             quinn_plaintext::client_config(),
-            "127.0.0.1:1337".parse().unwrap(),
+            "127.0.0.1:1337".parse()?,
             "plaintext.test",
-        )
-        .expect("could not create connection future")
-        .await
-        .expect("could not connect to server");
+        )?
+        .await?;
 
-    warn!("OPENING UNI STREAM");
-    let mut send = conn.open_uni().await.unwrap();
+    let mut send = conn.open_uni().await?;
+    send.write_all(b"hello world").await?;
+    send.finish()?;
+    send.stopped().await?;
+    info!("message delivered");
 
-    warn!("opened a unidirectional stream");
-
-    send.write_all(b"hello world").await.unwrap();
-
-    info!("wrote bytes!");
-
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    conn.close(0u32.into(), b"done");
+    client.wait_idle().await;
+    Ok(())
 }

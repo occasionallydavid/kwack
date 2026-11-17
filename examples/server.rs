@@ -1,45 +1,38 @@
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
+use std::time::Duration;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+type Error = Box<dyn std::error::Error + Send + Sync>;
+
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
-        .init();
+        .try_init()?;
 
-    let server_config = quinn_plaintext::server_config();
-    let server = quinn::Endpoint::server(server_config, "127.0.0.1:1337".parse().unwrap())
-        .expect("could not create endpoint server");
-
-    info!("server waiting to accept...");
-    loop {
-        let connecting = server
-            .accept()
-            .await
-            .expect("did not accept a conn!")
-            .accept()
-            .expect("did not accept a conn!");
-        warn!("accepted: {connecting:?}");
-
-        // possibly triggers a "0.5-RTT" handshake
-        let (conn, _) = connecting.into_0rtt().expect("into_0rtt failed");
-
-        warn!("completed accept: {conn:?}");
-
-        let mut recv = conn
-            .accept_uni()
-            .await
-            .expect("could not accept uni stream");
-
-        warn!("ACCEPTED UNI STREAM");
-
-        let expected = b"hello world";
-
-        let mut b = vec![0u8; expected.len()];
-        recv.read_exact(&mut b).await.expect("could not read data");
-        info!(
-            "read bytes! message: {}",
-            String::from_utf8_lossy(b.as_slice())
-        );
+    let server =
+        quinn::Endpoint::server(quinn_plaintext::server_config(), "127.0.0.1:1337".parse()?)?;
+    info!(address = %server.local_addr()?, "listening");
+    while let Some(incoming) = server.accept().await {
+        tokio::spawn(async move {
+            match tokio::time::timeout(Duration::from_secs(30), receive(incoming)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => warn!(%error, "connection failed"),
+                Err(_) => warn!("connection timed out"),
+            }
+        });
     }
+    Ok(())
+}
+
+async fn receive(incoming: quinn::Incoming) -> Result<(), Error> {
+    let conn = incoming.await?;
+    let mut recv = conn.accept_uni().await?;
+    let message = recv.read_to_end(64 * 1024).await?;
+    info!(message = %String::from_utf8_lossy(&message), "received message");
+    // Keep the connection alive until the sender has received acknowledgements.
+    conn.closed().await;
+    Ok(())
 }
