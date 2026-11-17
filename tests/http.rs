@@ -1,4 +1,4 @@
-#![cfg(all(feature = "http-client", feature = "http-server"))]
+#![cfg(all(feature = "client", feature = "server"))]
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};

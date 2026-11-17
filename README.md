@@ -45,12 +45,6 @@ and `POST /echo` echoes the request body. Set `BIND_ADDR` to change the listener
 pass additional authorized public keys as additional server arguments. Ctrl-C
 shuts down the example server.
 
-There is also an example using an actual, unmodified reqwest client:
-
-```sh
-cargo run --example reqwest -- "$CLIENT_PRIVATE" 127.0.0.1:4433 "$SERVER_PUBLIC"
-```
-
 ## Server API
 
 `serve(service)` accepts a cloneable Tower `Service<Request<hyper::body::Incoming>>`
@@ -112,14 +106,6 @@ streaming HTTP bodies; `Response::into_inner()` exposes the streaming Hyper
 response. Convenience body collection is limited to 8 MiB and a configurable
 read timeout. `bytes_with_limit()` overrides the buffering limit. HTTP/1.1 runs
 directly over QUIC streams; this is not standard TLS HTTP/3.
-
-For reqwest or ureq, `client.reqwest_bridge().await?` creates a managed loopback
-listener. Connect an ordinary HTTP client to `bridge.base_url()`. Keep the bridge
-alive. Its TCP connections become QUIC streams to the pinned peer. Configure
-that HTTP client with proxies and automatic redirects disabled, as demonstrated
-in `examples/reqwest.rs`, so those features cannot send requests outside the
-transport. The bridge trusts local processes that can reach its loopback port;
-use the native client when local access must not be shared.
 
 Keys parse from WireGuard's standard base64 format. `PrivateKey::generate()` uses
 an OS-backed cryptographic RNG. Private-key debug output is redacted. Keys use ordinary byte arrays and base64
@@ -184,10 +170,9 @@ application uses with `default-features = false`:
 
 | Feature | Provides |
 | --- | --- |
-| `http-server` | Generic Tower HTTP service support over Hyper. |
-| `http-client` | Native streaming HTTP client over Hyper. |
-| `bridge` | Loopback TCP bridge for reqwest/ureq; requires no HTTP dependencies. |
-| `http` | All three features above. |
+| `server` | Generic Tower HTTP service support over Hyper. |
+| `client` | Native streaming HTTP client over Hyper. |
+| `http` | Both features above. |
 
 The library uses the caller's Tokio runtime. Examples and tests use the
 current-thread runtime. Signal handling is enabled only for development targets.
@@ -209,7 +194,7 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Tests exercise authorization, server-key pinning, per-peer identity, revocation,
-HTTP and reqwest, replay rejection, packet loss, endpoint roaming, ciphertext
+HTTP, replay rejection, packet loss, endpoint roaming, ciphertext
 on the wire, and ordinary TLS QUIC sharing the same UDP port. `unwrap()` and `expect()` are denied outside tests.
 
 ## Source provenance

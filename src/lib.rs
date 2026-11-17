@@ -2,11 +2,9 @@
 //! QUIC streams authenticated and encrypted by a userspace WireGuard transport.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-#[cfg(feature = "bridge")]
-mod bridge;
-#[cfg(feature = "http-client")]
+#[cfg(feature = "client")]
 mod http_client;
-#[cfg(feature = "http-server")]
+#[cfg(feature = "server")]
 mod http_server;
 mod keys;
 mod packet;
@@ -14,9 +12,7 @@ mod plaintext;
 mod socket;
 mod transport;
 
-#[cfg(feature = "bridge")]
-pub use bridge::ReqwestBridge;
-#[cfg(feature = "http-client")]
+#[cfg(feature = "client")]
 pub use http_client::{HttpClient, RequestBuilder, Response};
 pub use keys::{PrivateKey, PublicKey};
 pub use transport::{
