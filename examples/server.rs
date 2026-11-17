@@ -5,7 +5,6 @@ use axum::{
     Router,
 };
 use wireguard_quic::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
-use zeroize::Zeroizing;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -13,10 +12,9 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init()?;
     let mut args = std::env::args().skip(1);
-    let encoded_private = Zeroizing::new(
-        args.next()
-            .ok_or("usage: server PRIVATE_KEY AUTHORIZED_PUBLIC_KEY [MORE_KEYS...]")?,
-    );
+    let encoded_private = args
+        .next()
+        .ok_or("usage: server PRIVATE_KEY AUTHORIZED_PUBLIC_KEY [MORE_KEYS...]")?;
     let private: PrivateKey = encoded_private.parse()?;
     let peers = args
         .map(|key| key.parse::<PublicKey>())

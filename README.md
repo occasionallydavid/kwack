@@ -114,8 +114,8 @@ transport. The bridge trusts local processes that can reach its loopback port;
 use the native client when local access must not be shared.
 
 Keys parse from WireGuard's standard base64 format. `PrivateKey::generate()` uses
-an OS-backed cryptographic RNG. Private-key debug output is redacted; owned key
-buffers and explicit base64 exports zeroize on drop.
+an OS-backed cryptographic RNG. Private-key debug output is redacted. Keys use ordinary byte arrays and base64
+exports return ordinary strings.
 
 ## Rejected packets and shared-port QUIC
 

@@ -22,7 +22,6 @@ hyper = { version = "1", features = ["client", "server", "http1"], optional = tr
 hyper-util = { version = "0.1", features = ["tokio", "service"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 base64 = "0.22"
-zeroize = "1"
 parking_lot = "0.12"
 
 tokio-util = { version = "0.7", features = ["rt"] }

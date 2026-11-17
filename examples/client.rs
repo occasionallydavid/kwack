@@ -1,14 +1,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 use wireguard_quic::{Client, Error, PrivateKey};
-use zeroize::Zeroizing;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let mut args = std::env::args().skip(1);
-    let encoded_private = Zeroizing::new(
-        args.next()
-            .ok_or("usage: client PRIVATE_KEY SERVER_ADDRESS SERVER_PUBLIC_KEY [PATH]")?,
-    );
+    let encoded_private = args
+        .next()
+        .ok_or("usage: client PRIVATE_KEY SERVER_ADDRESS SERVER_PUBLIC_KEY [PATH]")?;
     let private: PrivateKey = encoded_private.parse()?;
     let address = args.next().ok_or("missing server address")?.parse()?;
     let public = args.next().ok_or("missing server public key")?.parse()?;

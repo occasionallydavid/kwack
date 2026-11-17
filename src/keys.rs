@@ -2,29 +2,28 @@ use crate::Error;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use boringtun::x25519;
 use std::{fmt, str::FromStr};
-use zeroize::Zeroizing;
 
 /// A WireGuard static private key. Debug output is always redacted.
-pub struct PrivateKey(Zeroizing<[u8; 32]>);
+pub struct PrivateKey([u8; 32]);
 
 impl PrivateKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(Zeroizing::new(bytes))
+        Self(bytes)
     }
     pub fn generate() -> Result<Self, Error> {
-        let mut bytes = Zeroizing::new([0; 32]);
-        ring_random(&mut *bytes)?;
+        let mut bytes = [0; 32];
+        ring_random(&mut bytes)?;
         Ok(Self(bytes))
     }
     pub fn public_key(&self) -> PublicKey {
         PublicKey(x25519::PublicKey::from(&self.secret()).to_bytes())
     }
-    /// Explicit secret export in WireGuard's base64 format. The returned buffer zeroizes on drop.
-    pub fn to_base64(&self) -> Zeroizing<String> {
-        Zeroizing::new(STANDARD.encode(*self.0))
+    /// Explicit secret export in WireGuard's base64 format.
+    pub fn to_base64(&self) -> String {
+        STANDARD.encode(self.0)
     }
     pub(crate) fn secret(&self) -> x25519::StaticSecret {
-        x25519::StaticSecret::from(*self.0)
+        x25519::StaticSecret::from(self.0)
     }
 }
 
@@ -44,8 +43,8 @@ impl fmt::Debug for PrivateKey {
 impl FromStr for PrivateKey {
     type Err = Error;
     fn from_str(value: &str) -> Result<Self, Error> {
-        let mut bytes = Zeroizing::new([0; 32]);
-        let len = STANDARD.decode_slice(value.trim(), &mut *bytes)?;
+        let mut bytes = [0; 32];
+        let len = STANDARD.decode_slice(value.trim(), &mut bytes)?;
         if len != 32 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
