@@ -16,10 +16,17 @@ use quinn::{AsyncUdpSocket, Endpoint};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+use tokio::time::Instant;
 
 use crate::socket::{self, Inbound, Outbound, QUEUE, Target, VirtualSocket};
 use crate::{Error, PrivateKey, PublicKey, packet};
+
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_PEERS: usize = 1024;
+const RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
+const STREAM_RECEIVE_WINDOW: u32 = 1024 * 1024;
 
 /// Identity is attached only after a WireGuard-authenticated packet reaches QUIC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +61,9 @@ pub struct RejectedDatagram {
 }
 
 struct Peer {
+    index: u32,
+    acceptor: Option<AbortHandle>,
+    idle_since: Option<Instant>,
     tunnel: Tunn,
     remote: Option<SocketAddr>,
     incoming: mpsc::Sender<Inbound>,
@@ -76,10 +86,24 @@ struct Network {
 }
 impl Drop for Network {
     fn drop(&mut self) {
-        for endpoint in self.endpoints.lock().values() {
+        let endpoints: Vec<_> = self.endpoints.lock().values().cloned().collect();
+        for endpoint in &endpoints {
             endpoint.close(0u32.into(), b"shutdown");
         }
-        self.driver.abort();
+        let abort = self.driver.abort_handle();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+                    for endpoint in endpoints {
+                        endpoint.wait_idle().await;
+                    }
+                })
+                .await;
+                abort.abort();
+            });
+        } else {
+            abort.abort();
+        }
     }
 }
 impl Network {
@@ -354,6 +378,20 @@ pub struct Stream {
     // Streams keep the UDP driver alive even if their Client/Connection is dropped.
     network: Arc<Network>,
 }
+impl Drop for Stream {
+    fn drop(&mut self) {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // SendStream's destructor finishes the stream. Keep its transport alive
+            // until all queued bytes and the FIN are acknowledged, or draining expires.
+            let stopped = self.send.stopped();
+            let network = self.network.clone();
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(DRAIN_TIMEOUT, stopped).await;
+                drop(network);
+            });
+        }
+    }
+}
 impl fmt::Debug for Stream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Stream")
@@ -393,6 +431,12 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
         .min_mtu(packet::QUIC_MTU as u16)
         .mtu_discovery_config(None);
     config.max_concurrent_bidi_streams(64u32.into());
+    config.max_concurrent_uni_streams(0u32.into());
+    config.datagram_receive_buffer_size(None);
+    config.datagram_send_buffer_size(0);
+    config.receive_window(RECEIVE_WINDOW.into());
+    config.stream_receive_window(STREAM_RECEIVE_WINDOW.into());
+    config.send_window(u64::from(RECEIVE_WINDOW));
     config.keep_alive_interval(Some(Duration::from_secs(10)));
     Arc::new(config)
 }
@@ -417,6 +461,9 @@ fn peer_endpoint(
         let mut config = crate::plaintext::server_config();
         config.transport_config(transport_config());
         config.migration(false);
+        config.max_incoming(64);
+        config.incoming_buffer_size(256 * 1024);
+        config.incoming_buffer_size_total(2 * 1024 * 1024);
         Some(config)
     };
     let mut endpoint = Endpoint::new_with_abstract_socket(
@@ -446,6 +493,9 @@ fn start(
     let (accepted, accepted_rx) = mpsc::channel(QUEUE);
     let public = x25519::PublicKey::from(&private.secret());
     let limiter = Arc::new(RateLimiter::new(&public, 100));
+    // BoringTun rechecks MAC1 internally. Its validation-only limiter must not
+    // charge the dispatcher's global budget again or issue conflicting cookies.
+    let verifier = Arc::new(RateLimiter::new(&public, u64::MAX));
     let mut peers = HashMap::new();
     let mut indices = HashMap::new();
     let endpoints = Arc::new(Mutex::new(HashMap::new()));
@@ -454,13 +504,16 @@ fn start(
         peers.insert(
             key,
             Peer {
+                index: 1,
+                acceptor: None,
+                idle_since: None,
                 tunnel: Tunn::new(
                     private.secret(),
                     x25519::PublicKey::from(key.0),
                     None,
                     Some(25),
                     1,
-                    Some(limiter.clone()),
+                    Some(verifier.clone()),
                 ),
                 remote: Some(address),
                 incoming,
@@ -477,6 +530,7 @@ fn start(
             private,
             public,
             limiter,
+            verifier,
             peers,
             indices,
             rejected,
@@ -490,6 +544,7 @@ fn start(
             acceptors: JoinSet::new(),
             revoked: HashSet::new(),
             next_index: 2,
+            free_indices: Vec::new(),
             closing: false,
         };
         if let Err(error) = dispatcher.run(out_rx, cmd_rx).await {
@@ -515,6 +570,7 @@ struct Dispatcher {
     private: PrivateKey,
     public: x25519::PublicKey,
     limiter: Arc<RateLimiter>,
+    verifier: Arc<RateLimiter>,
     peers: HashMap<PublicKey, Peer>,
     indices: HashMap<u32, PublicKey>,
     rejected: mpsc::Sender<RejectedDatagram>,
@@ -528,6 +584,7 @@ struct Dispatcher {
     acceptors: JoinSet<()>,
     revoked: HashSet<PublicKey>,
     next_index: u32,
+    free_indices: Vec<u32>,
     closing: bool,
 }
 impl Dispatcher {
@@ -545,11 +602,7 @@ impl Dispatcher {
                 command=commands.recv()=>match command {
                     Some(Command::Revoke(key,ack))=>{
                         self.revoked.insert(key);
-                        self.peers.remove(&key);
-                        self.indices.retain(|_,v|*v!=key);
-                        if let Some(endpoint)=self.endpoints.lock().remove(&key) {
-                            endpoint.close(0u32.into(),b"peer revoked");
-                        }
+                        self.remove_peer(key,b"peer revoked");
                         let _=ack.send(());
                     }
                     Some(Command::Close(ack))=>{
@@ -583,6 +636,8 @@ impl Dispatcher {
                 },
                 _=timer.tick()=>{
                     self.limiter.reset_count();
+                    self.verifier.reset_count();
+                    self.expire_idle_peers(Instant::now());
                     // Collect before awaiting so no mutable tunnel borrow crosses send().
                     let mut packets=Vec::new();
                     for peer in self.peers.values_mut() {
@@ -597,6 +652,45 @@ impl Dispatcher {
             }
         }
     }
+    fn remove_peer(&mut self, key: PublicKey, reason: &[u8]) {
+        if let Some(peer) = self.peers.remove(&key) {
+            if let Some(acceptor) = peer.acceptor {
+                acceptor.abort();
+            }
+            self.indices.remove(&peer.index);
+            self.free_indices.push(peer.index);
+        }
+        if let Some(endpoint) = self.endpoints.lock().remove(&key) {
+            endpoint.close(0u32.into(), reason);
+        }
+    }
+
+    fn expire_idle_peers(&mut self, now: Instant) {
+        if self.client || self.closing {
+            return;
+        }
+        let mut expired = Vec::new();
+        {
+            let endpoints = self.endpoints.lock();
+            for (key, peer) in &mut self.peers {
+                if endpoints
+                    .get(key)
+                    .is_some_and(|endpoint| endpoint.open_connections() != 0)
+                {
+                    peer.idle_since = None;
+                } else {
+                    let since = peer.idle_since.get_or_insert(now);
+                    if now.duration_since(*since) >= PEER_IDLE_TIMEOUT {
+                        expired.push(*key);
+                    }
+                }
+            }
+        }
+        for key in expired {
+            self.remove_peer(key, b"peer idle");
+        }
+    }
+
     async fn send(&mut self, data: &[u8], destination: SocketAddr) {
         if let Err(error) = self.socket.send_to(data, destination).await {
             tracing::debug!(%error,"UDP send failed");
@@ -618,18 +712,21 @@ impl Dispatcher {
         });
     }
     async fn admit(&mut self, key: PublicKey, data: &[u8], source: SocketAddr, scratch: &mut [u8]) {
-        if self.peers.len() >= 65535 || self.next_index > 0x00ff_ffff {
+        if self.peers.len() >= MAX_PEERS
+            || (self.free_indices.is_empty() && self.next_index > 0x00ff_ffff)
+        {
             self.reject(data, source, RejectionReason::PeerLimitReached);
             return;
         }
-        let index = self.next_index;
+        // Do not consume an index until the handshake fully authenticates.
+        let index = self.free_indices.last().copied().unwrap_or(self.next_index);
         let mut tunnel = Tunn::new(
             self.private.secret(),
             x25519::PublicKey::from(key.0),
             None,
             Some(25),
             index,
-            Some(self.limiter.clone()),
+            Some(self.verifier.clone()),
         );
         let reply = match tunnel.decapsulate(Some(source.ip()), data, scratch) {
             TunnResult::WriteToNetwork(reply) if reply.starts_with(&[2, 0, 0, 0]) => reply.to_vec(),
@@ -651,7 +748,7 @@ impl Dispatcher {
         };
         let listener = endpoint.clone();
         let accepted = self.accepted.clone();
-        self.acceptors.spawn(async move {
+        let acceptor = self.acceptors.spawn(async move {
             while let Some(incoming) = listener.accept().await {
                 if accepted.send((key, incoming)).await.is_err() {
                     break;
@@ -662,13 +759,18 @@ impl Dispatcher {
         self.peers.insert(
             key,
             Peer {
+                index,
+                acceptor: Some(acceptor),
+                idle_since: Some(Instant::now()),
                 tunnel,
                 remote: None,
                 incoming,
             },
         );
         self.indices.insert(index, key);
-        self.next_index += 1;
+        if self.free_indices.pop().is_none() {
+            self.next_index += 1;
+        }
         self.send(&reply, source).await;
     }
 
@@ -749,7 +851,12 @@ impl Dispatcher {
         let mut replies = Vec::new();
         let mut failure = None;
         match peer.tunnel.decapsulate(Some(source.ip()), data, scratch) {
-            TunnResult::WriteToNetwork(reply) => replies.push(reply.to_vec()),
+            TunnResult::WriteToNetwork(reply) => {
+                if is_init && reply.starts_with(&[2, 0, 0, 0]) {
+                    peer.idle_since = Some(Instant::now());
+                }
+                replies.push(reply.to_vec());
+            }
             TunnResult::WriteToTunnelV4(inner, _) => {
                 // Endpoint roaming is permitted only after an authenticated transport packet.
                 peer.remote = Some(source);
@@ -796,6 +903,7 @@ mod tests {
     use blake2::digest::Mac;
     use blake2::digest::consts::U16;
     use blake2::{Blake2s256, Blake2sMac, Digest};
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
@@ -841,5 +949,148 @@ mod tests {
             .unwrap();
         assert_eq!(rejection.reason, RejectionReason::AuthenticationFailed);
         assert!(server.network.endpoints.lock().is_empty());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_peers_expire_and_can_be_readmitted() {
+        let server_key = PrivateKey::from_bytes([82; 32]);
+        let server_public = server_key.public_key();
+        let peer = PrivateKey::from_bytes([83; 32]).public_key();
+        let mut server = Server::builder(server_key)
+            .authorize(Box::new(move |key| key == peer))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let (client, connection) = tokio::join!(
+            Client::builder(PrivateKey::from_bytes([83; 32]))
+                .remote(server.local_addr(), server_public)
+                .connect(),
+            server.accept()
+        );
+        let client = client.unwrap();
+        let connection = connection.unwrap();
+        assert!(!server.network.endpoints.lock().is_empty());
+        connection.close();
+        client.close().await;
+        drop(client);
+        drop(connection);
+        let endpoint = server.network.endpoints.lock().get(&peer).unwrap().clone();
+        endpoint.wait_idle().await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+        assert!(!server.network.endpoints.lock().is_empty());
+        tokio::time::advance(PEER_IDLE_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert!(server.network.endpoints.lock().is_empty());
+        tokio::time::resume();
+        let (client, connection) = tokio::join!(
+            Client::builder(PrivateKey::from_bytes([83; 32]))
+                .remote(server.local_addr(), server_public)
+                .connect(),
+            server.accept()
+        );
+        let client = client.unwrap();
+        assert_eq!(connection.unwrap().peer_identity().public_key(), peer);
+        client.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_quic_capabilities_are_not_advertised() {
+        let server_key = PrivateKey::from_bytes([84; 32]);
+        let server_public = server_key.public_key();
+        let client_key = PrivateKey::from_bytes([85; 32]);
+        let mut server = Server::builder(server_key)
+            .authorize(Box::new(|_| true))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let (client, connection) = tokio::join!(
+            Client::builder(client_key)
+                .remote(server.local_addr(), server_public)
+                .connect(),
+            server.accept()
+        );
+        let client = client.unwrap();
+        let connection = connection.unwrap();
+        assert!(client.connection.inner.max_datagram_size().is_none());
+        assert!(connection.inner.max_datagram_size().is_none());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                client.connection.inner.open_uni()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), connection.inner.open_uni())
+                .await
+                .is_err()
+        );
+        client.close().await;
+    }
+
+    #[test]
+    fn tunnel_validation_does_not_charge_the_global_rate_budget() {
+        let private = x25519::StaticSecret::from([86; 32]);
+        let public = x25519::PublicKey::from(&private);
+        let client_private = x25519::StaticSecret::from([87; 32]);
+        let client_public = x25519::PublicKey::from(&client_private);
+        let limiter = RateLimiter::new(&public, 1);
+        let verifier = Arc::new(RateLimiter::new(&public, u64::MAX));
+        let mut server = Tunn::new(private, client_public, None, None, 1, Some(verifier));
+        let mut client = Tunn::new(client_private, public, None, None, 1, None);
+        let mut init_buf = [0; 2048];
+        let init = match client.format_handshake_initiation(&mut init_buf, false) {
+            TunnResult::WriteToNetwork(packet) => packet,
+            _ => panic!("expected initiation"),
+        };
+        let source = Some("127.0.0.1".parse().unwrap());
+        let mut scratch = [0; 2048];
+        assert!(limiter.verify_packet(source, init, &mut scratch).is_ok());
+        match server.decapsulate(source, init, &mut scratch) {
+            TunnResult::WriteToNetwork(packet) => assert_eq!(&packet[..4], &[2, 0, 0, 0]),
+            _ => panic!("first handshake must pass without another global budget charge"),
+        }
+        assert!(matches!(limiter.verify_packet(source, init, &mut scratch),
+            Err(TunnResult::WriteToNetwork(packet)) if packet.starts_with(&[3,0,0,0])));
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn unacknowledged_stream_drain_has_a_deadline() {
+        let server_key = PrivateKey::from_bytes([88; 32]);
+        let server_public = server_key.public_key();
+        let client_key = PrivateKey::from_bytes([89; 32]);
+        let mut server = Server::builder(server_key)
+            .authorize(Box::new(|_| true))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let (client, connection) = tokio::join!(
+            Client::builder(client_key)
+                .remote(server.local_addr(), server_public)
+                .connect(),
+            server.accept()
+        );
+        let client = client.unwrap();
+        let _connection = connection.unwrap();
+        // Stop the remote UDP driver so the last stream can never be acknowledged.
+        server.network.driver.abort();
+        tokio::task::yield_now().await;
+        let network = Arc::downgrade(&client.connection.network);
+        let driver = client.connection.network.driver.abort_handle();
+        let mut stream = client.connection().open_bi().await.unwrap();
+        stream.write_all(b"unacknowledged").await.unwrap();
+        stream.shutdown().await.unwrap();
+        tokio::time::pause();
+        drop(client);
+        drop(stream);
+        tokio::task::yield_now().await;
+        assert!(network.upgrade().is_some());
+        tokio::time::advance(DRAIN_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(network.upgrade().is_none());
+        tokio::time::advance(DRAIN_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(driver.is_finished());
     }
 }

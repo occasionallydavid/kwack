@@ -49,7 +49,9 @@ impl Server {
                     Ok(connection)=>{let service=service.clone();tasks.spawn(async move {serve_connection(connection,service).await;});}
                     Err(error)=>{if error.downcast_ref::<io::Error>().is_some_and(|e| e.kind()==io::ErrorKind::BrokenPipe) {break;}return Err(error);}
                 },
-                Some(_)=tasks.join_next(),if !tasks.is_empty()=>{},
+                Some(result)=tasks.join_next(),if !tasks.is_empty()=>{
+                    if let Err(error)=result {tracing::error!(%error,"HTTP connection task failed");}
+                },
             }
         }
         // JoinSet drop cancels outstanding connection and request tasks.
@@ -87,7 +89,9 @@ where
                 }
                 Err(_)=>break,
             },
-            Some(_)=tasks.join_next(),if !tasks.is_empty()=>{},
+            Some(result)=tasks.join_next(),if !tasks.is_empty()=>{
+                if let Err(error)=result {tracing::error!(%error,peer=%identity.public_key(),"HTTP stream task failed");}
+            },
         }
     }
 }

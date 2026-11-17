@@ -87,7 +87,9 @@ The callback sees a claimed key before full handshake authentication; peer state
 is installed only after the handshake authenticates. Returning false affects
 subsequent handshakes; call `revoke_peer` to terminate an existing session.
 Without a callback the server denies all peers. New peers are created lazily,
-with at most 65,535 active peers per server.
+with at most 1,024 cached peers per server. A peer with no live QUIC connections
+is evicted after 60 seconds and may be admitted again through the callback.
+WireGuard keepalives do not extend this idle period.
 
 Use `serve_with_shutdown(router, shutdown_future)` for coordinated shutdown,
 or `accept()` / `Connection::accept_bi()` for a custom application protocol.
@@ -177,7 +179,16 @@ a peer's outer address, allowing UDP endpoint roaming. BoringTun timers run ever
 Inner QUIC datagrams are capped at 1200 bytes. With the internal IPv4/UDP header
 and WireGuard transport overhead, the outer UDP payload is 1260 bytes. The path
 must accommodate this plus its outer IP/UDP headers; outer IP fragmentation and
-path MTU adaptation are not implemented. UDP segmentation offload is disabled.
+path MTU adaptation are not implemented. UDP segmentation offload is disabled. Unidirectional QUIC streams and QUIC
+datagrams are disabled. Each connection has an 8 MiB aggregate receive window,
+a 1 MiB per-stream receive window, and an 8 MiB send window. Each peer endpoint
+allows 64 pending connections, with at most 256 KiB buffered per pending
+connection and 2 MiB total pending-connection buffering.
+
+Dropped streams keep the transport alive for up to five seconds while queued
+data is acknowledged. Final transport teardown also allows up to five seconds
+for QUIC connection-close packets to drain. This requires a running Tokio runtime;
+explicitly close clients before shutting the runtime down.
 
 This package replaces the former `quinn-plaintext` public API and does not
 interoperate directly with stock TLS QUIC clients. Ordinary QUIC uses the

@@ -445,3 +445,38 @@ async fn queued_revocation_closes_connections_even_if_caller_cancels() {
     .await
     .expect("cancelled revocation test timed out");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_last_stream_drains_finished_writes() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server_key = key(80);
+        let server_public = server_key.public_key();
+        let client_key = key(81);
+        let peer = client_key.public_key();
+        let mut server = Server::builder(server_key)
+            .authorize(Box::new(move |key| key == peer))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let (client, connection) = tokio::join!(
+            Client::builder(client_key)
+                .remote(server.local_addr(), server_public)
+                .connect(),
+            server.accept()
+        );
+        let client = client.unwrap();
+        let connection = connection.unwrap();
+        let data = vec![0xa5; 128 * 1024];
+        let mut stream = client.connection().open_bi().await.unwrap();
+        stream.write_all(&data).await.unwrap();
+        stream.shutdown().await.unwrap();
+        drop(client);
+        drop(stream);
+        let mut received = Vec::new();
+        let mut stream = connection.accept_bi().await.unwrap();
+        stream.read_to_end(&mut received).await.unwrap();
+        assert_eq!(received, data);
+    })
+    .await
+    .expect("stream drain timed out");
+}

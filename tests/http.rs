@@ -273,3 +273,77 @@ async fn tower_service_honors_readiness_and_isolates_peer_identity() {
     .await
     .expect("Tower service test timed out");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn handler_panics_are_logged_without_stopping_other_streams() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    struct Log(Arc<Mutex<Vec<u8>>>);
+    impl Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let output = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_writer(move || Log(output.clone()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server_key = PrivateKey::from_bytes([90; 32]);
+        let server_public = server_key.public_key();
+        let client_key = PrivateKey::from_bytes([91; 32]);
+        let peer = client_key.public_key();
+        let server = Server::builder(server_key)
+            .authorize(Box::new(move |key| key == peer))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let handle = server.handle();
+        let address = server.local_addr();
+        let service = tower::service_fn(|request: Request<Incoming>| async move {
+            assert_ne!(request.uri().path(), "/panic", "intentional handler panic");
+            Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from_static(b"ok"))))
+        });
+        let task = tokio::spawn(server.serve(service));
+        let client = Client::builder(client_key)
+            .remote(address, server_public)
+            .connect()
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .uri("/panic")
+            .header("host", "test")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        assert!(client.send(request).await.is_err());
+        loop {
+            if String::from_utf8_lossy(&log.lock().unwrap()).contains("HTTP stream task failed") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "test")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let response = client.send(request).await.unwrap();
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "ok"
+        );
+        client.close().await;
+        handle.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    })
+    .await
+    .expect("handler panic test timed out");
+}
