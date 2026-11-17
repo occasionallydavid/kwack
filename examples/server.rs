@@ -2,9 +2,9 @@
 use axum::body::Bytes;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use wireguard_quic::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
+use quic_wg::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

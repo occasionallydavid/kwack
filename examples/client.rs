@@ -1,7 +1,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-use wireguard_quic::{Client, Error, PrivateKey};
+use quic_wg::{Client, Error, PrivateKey};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     let mut args = std::env::args().skip(1);
     let encoded_private = args

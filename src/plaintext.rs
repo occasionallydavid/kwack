@@ -454,7 +454,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn endpoints_transfer_large_bidirectional_stream() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let server =

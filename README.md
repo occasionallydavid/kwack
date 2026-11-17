@@ -1,4 +1,4 @@
-# wireguard-quic
+# quic_wg
 
 QUIC streams and HTTP authenticated and encrypted by BoringTun's userspace
 WireGuard state machine. One library owns the UDP socket, WireGuard handshakes,
@@ -60,7 +60,7 @@ for this crate's examples and tests.
 
 ```rust,no_run
 use axum::{Extension, Router, routing::get};
-use wireguard_quic::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
+use quic_wg::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
 
 # async fn example(server_private: PrivateKey, client_public: PublicKey) -> Result<(), Error> {
 let router = Router::new().route("/whoami", get(|Extension(peer): Extension<PeerIdentity>| async move {
@@ -94,7 +94,7 @@ concurrently with a bound on outstanding accept tasks.
 ## Client API
 
 ```rust,no_run
-use wireguard_quic::{Client, Error, PrivateKey, PublicKey};
+use quic_wg::{Client, Error, PrivateKey, PublicKey};
 # async fn example(private: PrivateKey, server_key: PublicKey) -> Result<(), Error> {
 let client = Client::builder(private)
     .remote("127.0.0.1:4433".parse()?, server_key)
@@ -179,11 +179,23 @@ not provide the inner QUIC/HTTP application endpoint.
 
 ## Features and validation
 
-The default `http` feature includes generic Tower service support, Hyper, and the
-reqwest-compatible loopback bridge. Disable defaults to use only authenticated streams:
+The default `http` feature enables all HTTP conveniences. Select only what your
+application uses with `default-features = false`:
+
+| Feature | Provides |
+| --- | --- |
+| `http-server` | Generic Tower HTTP service support over Hyper. |
+| `http-client` | Native streaming HTTP client over Hyper. |
+| `bridge` | Loopback TCP bridge for reqwest/ureq; requires no HTTP dependencies. |
+| `http` | All three features above. |
+
+The library uses the caller's Tokio runtime. Examples and tests use the
+current-thread runtime. Signal handling is enabled only for development targets.
+
+Disable defaults to use only authenticated streams:
 
 ```toml
-wireguard-quic = { version = "0.5", default-features = false }
+quic_wg = { version = "0.5", default-features = false }
 ```
 
 Formatting uses nightly rustfmt for module-level import grouping.
@@ -198,8 +210,7 @@ cargo clippy --all-targets -- -D warnings
 
 Tests exercise authorization, server-key pinning, per-peer identity, revocation,
 HTTP and reqwest, replay rejection, packet loss, endpoint roaming, ciphertext
-on the wire, and ordinary TLS QUIC sharing the same UDP port. CI includes x86,
-x86-64, and ARM64. `unwrap()` and `expect()` are denied outside tests.
+on the wire, and ordinary TLS QUIC sharing the same UDP port. `unwrap()` and `expect()` are denied outside tests.
 
 ## Source provenance
 

@@ -1,14 +1,14 @@
 use std::time::Duration;
 
+use quic_wg::{Client, PrivateKey, PublicKey, RejectionReason, Server};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use wireguard_quic::{Client, PrivateKey, PublicKey, RejectionReason, Server};
 
 fn key(byte: u8) -> PrivateKey {
     PrivateKey::from_bytes([byte; 32])
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn authenticated_streams_bind_identity_to_each_peer() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let server_key = key(1);
@@ -68,7 +68,7 @@ async fn authenticated_streams_bind_identity_to_each_peer() {
     .expect("transport timed out");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn wrong_key_and_unauthorized_clients_never_connect() {
     let server_key = key(4);
     let public = server_key.public_key();
@@ -96,7 +96,7 @@ async fn wrong_key_and_unauthorized_clients_never_connect() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn raw_udp_rejections_are_preserved_and_fallback_can_reply() {
     use std::sync::Arc;
 
@@ -153,7 +153,7 @@ async fn raw_udp_rejections_are_preserved_and_fallback_can_reply() {
     assert_eq!(source, server.local_addr());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn key_formats_roundtrip_and_debug_redacts_private_key() {
     let private = PrivateKey::generate().unwrap();
     let decoded: PrivateKey = private.to_base64().parse().unwrap();
@@ -165,7 +165,7 @@ async fn key_formats_roundtrip_and_debug_redacts_private_key() {
     assert!("bad".parse::<PublicKey>().is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn encrypted_transport_survives_loss_replay_and_udp_roaming() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -222,7 +222,7 @@ async fn encrypted_transport_survives_loss_replay_and_udp_roaming() {
     }).await.expect("loss/roaming test timed out");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn standard_tls_quic_and_wireguard_quic_share_one_udp_port() {
     use std::sync::Arc;
     tokio::time::timeout(Duration::from_secs(10), async {

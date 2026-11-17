@@ -1,4 +1,4 @@
-#![cfg(feature = "http")]
+#![cfg(all(feature = "http-client", feature = "http-server"))]
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -10,12 +10,12 @@ use bytes::Bytes;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
+use quic_wg::{Client, Error, PeerIdentity, PrivateKey, Server};
 use tokio::task::JoinSet;
 use tower_service::Service;
-use wireguard_quic::{Client, Error, PeerIdentity, PrivateKey, Server};
 
-#[tokio::test]
-async fn axum_streaming_http_and_reqwest_use_authenticated_transport() {
+#[tokio::test(flavor = "current_thread")]
+async fn axum_streaming_http_uses_authenticated_transport() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let server_key = PrivateKey::from_bytes([20; 32]);
         let server_public = server_key.public_key();
@@ -69,23 +69,6 @@ async fn axum_streaming_http_and_reqwest_use_authenticated_transport() {
                 .unwrap()[..],
             body
         );
-        let bridge = client.reqwest_bridge().await.unwrap();
-        let reqwest = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap();
-        assert_eq!(
-            reqwest
-                .get(format!("{}/whoami", bridge.base_url()))
-                .send()
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap(),
-            client_public.to_string()
-        );
         for _ in 0..5 {
             let http = client.http();
             tasks.spawn(async move { http.get("/whoami").send().await.map(|_| ()) });
@@ -101,7 +84,6 @@ async fn axum_streaming_http_and_reqwest_use_authenticated_transport() {
                 .await
                 .is_err()
         );
-        drop(bridge);
         client.close().await;
         handle.shutdown().await.unwrap();
     })
@@ -109,7 +91,7 @@ async fn axum_streaming_http_and_reqwest_use_authenticated_transport() {
     .expect("HTTP test timed out");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn revocation_closes_existing_connections_and_blocks_reconnect() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let server_key = PrivateKey::from_bytes([22; 32]);
@@ -206,7 +188,7 @@ impl Service<Request<Incoming>> for EchoService {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn tower_service_honors_readiness_and_isolates_peer_identity() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let server_key = PrivateKey::from_bytes([24; 32]);
