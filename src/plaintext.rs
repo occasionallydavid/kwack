@@ -7,8 +7,9 @@ use std::sync::Arc;
 use bytes::BytesMut;
 
 use quinn_proto::{
+    ConnectionId, Side, TransportError,
     crypto::{self, CryptoError, HeaderKey},
-    transport_parameters, ConnectionId, Side, TransportError,
+    transport_parameters,
 };
 use tracing::trace;
 
@@ -331,7 +332,7 @@ impl crypto::PacketKey for PlaintextPacketKey {
 mod tests {
     use super::*;
     use crypto::{PacketKey, Session};
-    use quinn_proto::{transport_parameters::TransportParameters, TransportErrorCode};
+    use quinn_proto::{TransportErrorCode, transport_parameters::TransportParameters};
     use std::time::Duration;
 
     fn session(side: Side) -> PlaintextSession {
@@ -428,9 +429,11 @@ mod tests {
     #[test]
     fn key_export_is_explicitly_unsupported() {
         let mut output = [0xa5; 32];
-        assert!(session(Side::Client)
-            .export_keying_material(&mut output, b"label", b"context")
-            .is_err());
+        assert!(
+            session(Side::Client)
+                .export_keying_material(&mut output, b"label", b"context")
+                .is_err()
+        );
         assert_eq!(output, [0xa5; 32]);
     }
 

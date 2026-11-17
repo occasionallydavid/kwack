@@ -1,8 +1,8 @@
 [package]
 name = "wireguard-quic"
 version = "0.5.0"
-edition = "2021"
-resolver = "2"
+edition = "2024"
+resolver = "3"
 license = "MIT OR Apache-2.0"
 keywords = ["quic"]
 categories = ["network-programming", "asynchronous"]

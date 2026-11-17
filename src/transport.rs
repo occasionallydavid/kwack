@@ -1,10 +1,9 @@
 use crate::{
-    packet,
-    socket::{self, Inbound, Outbound, Target, VirtualSocket, QUEUE},
-    Error, PrivateKey, PublicKey,
+    Error, PrivateKey, PublicKey, packet,
+    socket::{self, Inbound, Outbound, QUEUE, Target, VirtualSocket},
 };
 use boringtun::{
-    noise::{handshake::parse_handshake_anon, rate_limiter::RateLimiter, Packet, Tunn, TunnResult},
+    noise::{Packet, Tunn, TunnResult, handshake::parse_handshake_anon, rate_limiter::RateLimiter},
     x25519,
 };
 use bytes::Bytes;
@@ -560,8 +559,10 @@ impl Dispatcher {
                     // Collect before awaiting so no mutable tunnel borrow crosses send().
                     let mut packets=Vec::new();
                     for peer in self.peers.values_mut() {
-                        if let Some(remote)=peer.remote {
-                            if let TunnResult::WriteToNetwork(data)=peer.tunnel.update_timers(&mut scratch) {packets.push((remote,data.to_vec()));}
+                        if let Some(remote)=peer.remote
+                            && let TunnResult::WriteToNetwork(data)=peer.tunnel.update_timers(&mut scratch)
+                        {
+                            packets.push((remote,data.to_vec()));
                         }
                     }
                     for (remote,data) in packets {self.send(&data,remote).await;}

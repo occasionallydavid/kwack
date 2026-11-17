@@ -79,18 +79,22 @@ async fn wrong_key_and_unauthorized_clients_never_connect() {
         .await
         .unwrap();
     let address = server.local_addr();
-    assert!(Client::builder(key(6))
-        .remote(address, public)
-        .connect_timeout(Duration::from_millis(350))
-        .connect()
-        .await
-        .is_err());
-    assert!(Client::builder(key(5))
-        .remote(address, key(7).public_key())
-        .connect_timeout(Duration::from_millis(350))
-        .connect()
-        .await
-        .is_err());
+    assert!(
+        Client::builder(key(6))
+            .remote(address, public)
+            .connect_timeout(Duration::from_millis(350))
+            .connect()
+            .await
+            .is_err()
+    );
+    assert!(
+        Client::builder(key(5))
+            .remote(address, key(7).public_key())
+            .connect_timeout(Duration::from_millis(350))
+            .connect()
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -164,8 +168,8 @@ async fn key_formats_roundtrip_and_debug_redacts_private_key() {
 #[tokio::test]
 async fn encrypted_transport_survives_loss_replay_and_udp_roaming() {
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
     use tokio::task::JoinSet;
     tokio::time::timeout(Duration::from_secs(15),async {
@@ -194,7 +198,7 @@ async fn encrypted_transport_survives_loss_replay_and_udp_roaming() {
                         }
                         socket.send_to(&a[..len],server_address).await.unwrap();
                     }
-                    received=back1.recv_from(&mut b)=>{let (len,_)=received.unwrap();if !changed.load(Ordering::SeqCst) {if let Some(client)=client_address {front.send_to(&b[..len],client).await.unwrap();}}}
+                    received=back1.recv_from(&mut b)=>{let (len,_)=received.unwrap();if !changed.load(Ordering::SeqCst) && let Some(client)=client_address {front.send_to(&b[..len],client).await.unwrap();}}
                     received=back2.recv_from(&mut c)=>{let (len,_)=received.unwrap();if let Some(client)=client_address {front.send_to(&c[..len],client).await.unwrap();}}
                 }
             }

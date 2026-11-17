@@ -1,8 +1,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 use axum::{
+    Router,
     body::Bytes,
     routing::{get, post},
-    Router,
 };
 use wireguard_quic::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
 

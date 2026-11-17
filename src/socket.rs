@@ -2,8 +2,8 @@ use crate::PublicKey;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use quinn::{
-    udp::{RecvMeta, Transmit},
     AsyncUdpSocket, UdpPoller,
+    udp::{RecvMeta, Transmit},
 };
 use std::{
     io::{self, IoSliceMut},

@@ -1,7 +1,7 @@
 use crate::{Client, Connection, Error, PeerIdentity, Server};
 use axum::{
-    http::{self, HeaderMap, Method, Request, StatusCode},
     Extension, Router,
+    http::{self, HeaderMap, Method, Request, StatusCode},
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -15,7 +15,7 @@ use hyper_util::{
 };
 use std::{future::Future, io, net::SocketAddr, time::Duration};
 use tokio::{
-    io::{copy_bidirectional, AsyncWriteExt},
+    io::{AsyncWriteExt, copy_bidirectional},
     net::TcpListener,
     task::{JoinHandle, JoinSet},
 };

@@ -1,8 +1,8 @@
 #![cfg(feature = "http")]
 use axum::{
+    Router,
     body::Bytes,
     routing::{get, post},
-    Router,
 };
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -85,12 +85,14 @@ async fn axum_streaming_http_and_reqwest_use_authenticated_transport() {
         for _ in 0..5 {
             assert!(tasks.join_next().await.unwrap().unwrap().is_ok());
         }
-        assert!(client
-            .http()
-            .get("http://example.com/")
-            .send()
-            .await
-            .is_err());
+        assert!(
+            client
+                .http()
+                .get("http://example.com/")
+                .send()
+                .await
+                .is_err()
+        );
         drop(bridge);
         client.close().await;
         handle.shutdown().await.unwrap();
@@ -135,19 +137,23 @@ async fn revocation_closes_existing_connections_and_blocks_reconnect() {
         handle.revoke_peer(peer).await.unwrap();
         // The remote can only learn revocation by closure or timeout; the server must
         // immediately cease servicing requests regardless of notification delivery.
-        assert!(client
-            .http()
-            .timeout(Duration::from_millis(300))
-            .get("/")
-            .send()
-            .await
-            .is_err());
-        assert!(Client::builder(PrivateKey::from_bytes([23; 32]))
-            .remote(address, public)
-            .connect_timeout(Duration::from_millis(300))
-            .connect()
-            .await
-            .is_err());
+        assert!(
+            client
+                .http()
+                .timeout(Duration::from_millis(300))
+                .get("/")
+                .send()
+                .await
+                .is_err()
+        );
+        assert!(
+            Client::builder(PrivateKey::from_bytes([23; 32]))
+                .remote(address, public)
+                .connect_timeout(Duration::from_millis(300))
+                .connect()
+                .await
+                .is_err()
+        );
     })
     .await
     .expect("revocation test timed out");
