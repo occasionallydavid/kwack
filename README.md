@@ -12,7 +12,8 @@ The server has its own private key and an explicit list of authorized client
 public keys. The client supplies its private key and pins the server public key.
 WireGuard provides authentication, encryption, and replay protection. The inner
 QUIC implementation provides reliability, congestion control, and independent
-streams. Plaintext QUIC configuration is private to the crate.
+streams. Inner QUIC packets carry no additional checksum or authentication tag.
+Plaintext QUIC configuration is private to the crate.
 
 ## Run the examples
 

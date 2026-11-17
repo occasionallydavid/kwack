@@ -13,7 +13,6 @@ description = "Authenticated QUIC streams and HTTP over userspace WireGuard"
 bytes = "1"
 quinn-proto = { version = "0.11.8", default-features = false, features = ["ring"] }
 tracing = "0.1"
-seahash = "4.1.0"
 boringtun = { version = "0.7.1", default-features = false }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }

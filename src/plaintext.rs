@@ -1,8 +1,8 @@
 //! Plaintext QUIC for use inside an authenticated, encrypted tunnel.
 //!
-//! Packet checksums detect accidental corruption; they do not authenticate peers.
+//! WireGuard provides packet authentication and integrity; this adapter adds no tags.
 
-use std::{hash::Hasher, sync::Arc};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 
@@ -10,7 +10,6 @@ use quinn_proto::{
     crypto::{self, CryptoError, HeaderKey},
     transport_parameters, ConnectionId, Side, TransportError,
 };
-use seahash::SeaHasher;
 use tracing::trace;
 
 // The frame length excludes its four-byte prefix.
@@ -26,16 +25,6 @@ fn write_transport_parameters(
     // Quinn transport parameters have bounded fields and fit in a u32.
     let len = buf.len() - start - 4;
     buf[start..start + 4].copy_from_slice(&(len as u32).to_be_bytes());
-}
-
-fn packet_checksum(header: &[u8], payload: &[u8]) -> u64 {
-    let mut hasher = SeaHasher::default();
-    // Fixed-width lengths preserve the original 64-bit checksum format on every target.
-    hasher.write(&(header.len() as u64).to_le_bytes());
-    hasher.write(header);
-    hasher.write(&(payload.len() as u64).to_le_bytes());
-    hasher.write(payload);
-    hasher.finish()
 }
 
 pub fn server_config() -> quinn_proto::ServerConfig {
@@ -312,35 +301,19 @@ impl crypto::ServerConfig for PlaintextServerConfig {
 }
 
 impl crypto::PacketKey for PlaintextPacketKey {
-    fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
-        trace!(side = ?self.side, packet, header_len, "checksum packet");
-        let (header, payload_tag) = buf.split_at_mut(header_len);
-        let (payload, tag) = payload_tag.split_at_mut(payload_tag.len() - self.tag_len());
-        tag.copy_from_slice(&packet_checksum(header, payload).to_be_bytes());
-    }
+    fn encrypt(&self, _packet: u64, _buf: &mut [u8], _header_len: usize) {}
 
     fn decrypt(
         &self,
-        packet: u64,
-        header: &[u8],
-        payload: &mut BytesMut,
+        _packet: u64,
+        _header: &[u8],
+        _payload: &mut BytesMut,
     ) -> Result<(), CryptoError> {
-        trace!(side = ?self.side, packet, "verify packet checksum");
-        let payload_len = payload
-            .len()
-            .checked_sub(self.tag_len())
-            .ok_or(CryptoError)?;
-        let (data, tag) = payload.split_at(payload_len);
-        if packet_checksum(header, data).to_be_bytes() != tag {
-            return Err(CryptoError);
-        }
-        payload.truncate(payload_len);
         Ok(())
     }
 
     fn tag_len(&self) -> usize {
-        trace!(side = ?self.side, "PacketKey::tag_len");
-        8
+        0
     }
 
     fn confidentiality_limit(&self) -> u64 {
@@ -462,25 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn checksum_uses_fixed_width_lengths() {
-        let header = b"header";
-        let payload = b"payload";
-        let mut canonical = vec![6, 0, 0, 0, 0, 0, 0, 0];
-        canonical.extend_from_slice(header);
-        canonical.extend_from_slice(&[7, 0, 0, 0, 0, 0, 0, 0]);
-        canonical.extend_from_slice(payload);
-        assert_eq!(packet_checksum(header, payload), 0x2301_d2c1_d557_ee91);
-        assert_eq!(packet_checksum(header, payload), seahash::hash(&canonical));
-        // Hash::hash historically used 32-bit length prefixes on 32-bit targets.
-        let mut legacy32 = Vec::new();
-        legacy32.extend_from_slice(&6u32.to_le_bytes());
-        legacy32.extend_from_slice(header);
-        legacy32.extend_from_slice(&7u32.to_le_bytes());
-        legacy32.extend_from_slice(payload);
-        assert_ne!(packet_checksum(header, payload), seahash::hash(&legacy32));
-    }
-
-    #[test]
     fn packet_roundtrips_cover_empty_and_long_payloads() {
         for side in [Side::Client, Side::Server] {
             let key = PlaintextPacketKey::new(side);
@@ -495,28 +449,6 @@ mod tests {
                 key.decrypt(1, header, &mut payload).unwrap();
                 assert_eq!(payload.as_ref(), data);
             }
-        }
-    }
-
-    #[test]
-    fn corrupted_packets_and_short_tags_are_rejected_without_mutation() {
-        let key = PlaintextPacketKey::new(Side::Server);
-        for len in 0..key.tag_len() {
-            let mut payload = BytesMut::from(&vec![0; len][..]);
-            let original = payload.clone();
-            assert!(key.decrypt(0, b"header", &mut payload).is_err());
-            assert_eq!(payload, original);
-        }
-        let mut packet = b"headerpayload".to_vec();
-        packet.resize(packet.len() + key.tag_len(), 0);
-        key.encrypt(0, &mut packet, 6);
-        for index in 0..packet.len() {
-            let mut corrupted = packet.clone();
-            corrupted[index] ^= 1;
-            let mut payload = BytesMut::from(&corrupted[6..]);
-            let original = payload.clone();
-            assert!(key.decrypt(0, &corrupted[..6], &mut payload).is_err());
-            assert_eq!(payload, original);
         }
     }
 

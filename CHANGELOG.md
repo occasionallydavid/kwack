@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- (BREAKING) Remove the redundant SeaHash checksum and eight-byte tag from inner QUIC packets; WireGuard provides packet integrity. Upgrade both peers together.
+
 ## 0.5.0
 
 - (BREAKING) Rename the crate to `wireguard-quic` and make bare plaintext QUIC configuration private.
