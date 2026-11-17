@@ -1,19 +1,17 @@
-use crate::PublicKey;
+use std::io::{self, IoSliceMut};
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
 use bytes::Bytes;
 use parking_lot::Mutex;
-use quinn::{
-    AsyncUdpSocket, UdpPoller,
-    udp::{RecvMeta, Transmit},
-};
-use std::{
-    io::{self, IoSliceMut},
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use quinn::udp::{RecvMeta, Transmit};
+use quinn::{AsyncUdpSocket, UdpPoller};
 use tokio::sync::mpsc;
 use tokio_util::sync::PollSender;
+
+use crate::PublicKey;
 
 pub(crate) const QUEUE: usize = 256;
 pub(crate) const VIRTUAL_LOCAL: SocketAddr = SocketAddr::new(

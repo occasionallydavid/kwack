@@ -1,7 +1,11 @@
-use crate::Error;
-use base64::{Engine, engine::general_purpose::STANDARD};
+use std::fmt;
+use std::str::FromStr;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use boringtun::x25519;
-use std::{fmt, str::FromStr};
+
+use crate::Error;
 
 /// A WireGuard static private key. Debug output is always redacted.
 pub struct PrivateKey([u8; 32]);

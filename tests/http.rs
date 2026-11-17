@@ -1,10 +1,9 @@
 #![cfg(feature = "http")]
-use axum::{
-    Router,
-    body::Bytes,
-    routing::{get, post},
-};
 use std::time::Duration;
+
+use axum::Router;
+use axum::body::Bytes;
+use axum::routing::{get, post};
 use tokio::task::JoinSet;
 use wireguard_quic::{Client, PeerIdentity, PrivateKey, Server};
 

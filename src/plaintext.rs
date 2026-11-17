@@ -5,12 +5,8 @@
 use std::sync::Arc;
 
 use bytes::BytesMut;
-
-use quinn_proto::{
-    ConnectionId, Side, TransportError,
-    crypto::{self, CryptoError, HeaderKey},
-    transport_parameters,
-};
+use quinn_proto::crypto::{self, CryptoError, HeaderKey};
+use quinn_proto::{ConnectionId, Side, TransportError, transport_parameters};
 use tracing::trace;
 
 // The frame length excludes its four-byte prefix.
@@ -330,10 +326,13 @@ impl crypto::PacketKey for PlaintextPacketKey {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crypto::{PacketKey, Session};
-    use quinn_proto::{TransportErrorCode, transport_parameters::TransportParameters};
     use std::time::Duration;
+
+    use crypto::{PacketKey, Session};
+    use quinn_proto::TransportErrorCode;
+    use quinn_proto::transport_parameters::TransportParameters;
+
+    use super::*;
 
     fn session(side: Side) -> PlaintextSession {
         PlaintextSession::new(

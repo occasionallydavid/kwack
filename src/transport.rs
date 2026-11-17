@@ -1,29 +1,25 @@
-use crate::{
-    Error, PrivateKey, PublicKey, packet,
-    socket::{self, Inbound, Outbound, QUEUE, Target, VirtualSocket},
-};
-use boringtun::{
-    noise::{Packet, Tunn, TunnResult, handshake::parse_handshake_anon, rate_limiter::RateLimiter},
-    x25519,
-};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+use std::{fmt, io};
+
+use boringtun::noise::handshake::parse_handshake_anon;
+use boringtun::noise::rate_limiter::RateLimiter;
+use boringtun::noise::{Packet, Tunn, TunnResult};
+use boringtun::x25519;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use quinn::{AsyncUdpSocket, Endpoint};
-use std::{
-    collections::HashMap,
-    fmt, io,
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::Duration,
-};
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::UdpSocket,
-    sync::{mpsc, oneshot},
-    task::{JoinHandle, JoinSet},
-};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
+
+use crate::socket::{self, Inbound, Outbound, QUEUE, Target, VirtualSocket};
+use crate::{Error, PrivateKey, PublicKey, packet};
 
 /// Identity is attached only after a WireGuard-authenticated packet reaches QUIC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

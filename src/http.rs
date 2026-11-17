@@ -1,24 +1,21 @@
-use crate::{Client, Connection, Error, PeerIdentity, Server};
-use axum::{
-    Extension, Router,
-    http::{self, HeaderMap, Method, Request, StatusCode},
-};
+use std::future::Future;
+use std::io;
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use axum::http::{self, HeaderMap, Method, Request, StatusCode};
+use axum::{Extension, Router};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::{
-    body::{Body, Incoming},
-    client::conn::http1,
-};
-use hyper_util::{
-    rt::{TokioIo, TokioTimer},
-    service::TowerToHyperService,
-};
-use std::{future::Future, io, net::SocketAddr, time::Duration};
-use tokio::{
-    io::{AsyncWriteExt, copy_bidirectional},
-    net::TcpListener,
-    task::{JoinHandle, JoinSet},
-};
+use hyper::body::{Body, Incoming};
+use hyper::client::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
+use tokio::io::{AsyncWriteExt, copy_bidirectional};
+use tokio::net::TcpListener;
+use tokio::task::{JoinHandle, JoinSet};
+
+use crate::{Client, Connection, Error, PeerIdentity, Server};
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerIdentity {
     type Rejection = (StatusCode, &'static str);

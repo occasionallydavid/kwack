@@ -179,8 +179,10 @@ loopback bridge. Disable defaults to use only authenticated streams:
 wireguard-quic = { version = "0.5", default-features = false }
 ```
 
+Formatting uses nightly rustfmt for module-level import grouping.
+
 ```sh
-cargo fmt --check
+cargo +nightly fmt --check
 cargo check --no-default-features --lib
 cargo test --all-targets
 cargo test --doc

@@ -1,8 +1,7 @@
 use std::time::Duration;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UdpSocket,
-};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UdpSocket;
 use wireguard_quic::{Client, PrivateKey, PublicKey, RejectionReason, Server};
 
 fn key(byte: u8) -> PrivateKey {
@@ -99,8 +98,9 @@ async fn wrong_key_and_unauthorized_clients_never_connect() {
 
 #[tokio::test]
 async fn raw_udp_rejections_are_preserved_and_fallback_can_reply() {
-    use quinn::AsyncUdpSocket;
     use std::sync::Arc;
+
+    use quinn::AsyncUdpSocket;
     let server = Server::builder(key(8)).bind("127.0.0.1:0").await.unwrap();
     let mut rejected = server.take_rejected().unwrap();
     let fallback: Arc<dyn AsyncUdpSocket> = server.take_fallback_socket().unwrap();
@@ -167,10 +167,9 @@ async fn key_formats_roundtrip_and_debug_redacts_private_key() {
 
 #[tokio::test]
 async fn encrypted_transport_survives_loss_replay_and_udp_roaming() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use tokio::task::JoinSet;
     tokio::time::timeout(Duration::from_secs(15),async {
         let server_key=key(30);let public=server_key.public_key();let client_key=key(31);
