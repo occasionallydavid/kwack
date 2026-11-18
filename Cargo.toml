@@ -7,9 +7,9 @@ license = "Apache-2.0"
 keywords = ["quic", "mtls", "rustls", "ed25519"]
 categories = ["cryptography", "network-programming"]
 readme = "README.md"
-description = "Ed25519 certificates and public-key allowlists for rustls and QUIC"
+description = "Ed25519 key-based mutual TLS for rustls, Tower, and reqwest"
 documentation = "https://docs.rs/kwack"
-repository = "https://github.com/occasionallydavid/quic_wg"
+repository = "https://github.com/occasionallydavid/kwack"
 
 [dependencies]
 base64 = { version = "0.22", default-features = false, features = ["std"] }

@@ -1,26 +1,36 @@
 # kwack
 
-Ed25519 mutual TLS helpers for rustls, with optional HTTP/3 helpers for Tower services and reqwest.
+## Why?
+
+We want to use software that expects X.509 without a doctorate in certificate
+management. If you already know which peers you want to trust, an Ed25519
+public key can be their identity. Give each peer its own private key and a list
+of the public keys it should accept. Kwack makes those keys work with mutual
+TLS:
 
 - `Identity` takes a base64 Ed25519 private key and generates a deterministic
   self-signed X.509 certificate. It accepts a raw 32-byte seed or PKCS #8 DER.
-- `Verifier` takes an allowlist of base64 Ed25519 public keys. It accepts raw
-  32-byte keys or SubjectPublicKeyInfo DER and implements both rustls verifier
-  traits. An empty list denies every peer.
+- `Verifier` plugs into rustls on either side of the handshake. A peer gets
+  in when its key is on the allowlist and it proves it holds the private key.
+- The optional Tower server puts the authenticated key in each request as
+  `PeerIdentity`. Your service can use it to decide who can do what.
+- The optional reqwest helper builds an HTTP/3 mTLS client from its private
+  key and the server public keys it trusts.
+
+## Certificate and key formats
 
 Use standard padded base64. Ed25519 is a signing key format and is distinct
-from the X25519 keys used by WireGuard.
+from the X25519 keys used by WireGuard. Allowlist entries can be raw 32-byte
+public keys or SubjectPublicKeyInfo DER. An empty allowlist denies every peer.
 
 The generated certificate has DNS name `a` and fixed validity from
 2000-01-01 to 2049-01-01 UTC. The same key produces the same certificate with
 the same generation profile. A certificate can also be exported as base64 DER
 with `certificate_base64()`.
 
-A peer must present a self-signed Ed25519 leaf whose public key is in the
-allowlist and prove possession of the private key in TLS. The verifier checks
-certificate signatures, validity dates, and TLS purpose. Server verification
-also checks the supplied name against the SAN. To revoke a pin, replace the
-verifier and close any existing sessions for that key.
+The verifier checks certificate signatures, validity dates, and TLS purpose.
+When verifying a server it also checks the requested name against the SAN.
+To revoke a pin, replace the verifier and close any existing sessions for that key.
 
 ## Optional HTTP/3 helpers
 
