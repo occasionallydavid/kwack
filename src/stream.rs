@@ -23,6 +23,10 @@ const RECEIVE_BUFFER: usize = 256 * 1024;
 
 const SEND_SEGMENTS: usize = 128;
 
+const SMALL_WRITE_DELAY: Duration = Duration::from_micros(2500);
+
+const SMALL_WRITE_THRESHOLD: usize = 256;
+
 const OPEN: u8 = 0;
 
 const DATA: u8 = 1;
@@ -62,6 +66,8 @@ pub(crate) struct Conversation {
     reader: Option<Waker>,
     writer: Option<Waker>,
     open_pending: bool,
+    pending_write: Vec<u8>,
+    pub(crate) write_deadline: Option<Instant>,
     created: Instant,
 }
 
@@ -91,6 +97,8 @@ impl Conversation {
             reader: None,
             writer: None,
             open_pending: local,
+            pending_write: Vec::new(),
+            write_deadline: None,
             created: Instant::now(),
         })
     }
@@ -151,15 +159,46 @@ impl Conversation {
     }
 
     pub(crate) fn flush_open(&mut self, force: bool) -> io::Result<()> {
-        if self.open_pending && (force || self.created.elapsed() >= Duration::from_millis(10)) {
+        if self.open_pending
+            && self.pending_write.is_empty()
+            && (force || self.created.elapsed() >= Duration::from_millis(10))
+        {
             self.kcp.send(&[OPEN])?;
             self.open_pending = false;
         }
         Ok(())
     }
 
+    // Returns true when the driver needs to schedule a deadline or send now.
+    fn queue_write(&mut self, data: &[u8]) -> io::Result<bool> {
+        let first = self.pending_write.is_empty();
+        if first {
+            self.pending_write
+                .push(if self.open_pending { OPEN } else { DATA });
+            self.write_deadline = Some(Instant::now() + SMALL_WRITE_DELAY);
+        }
+        self.pending_write.extend_from_slice(data);
+        if self.pending_write.len() > SMALL_WRITE_THRESHOLD {
+            self.flush_writes()?;
+            self.io_pending = true;
+            return Ok(true);
+        }
+        Ok(first)
+    }
+
+    pub(crate) fn flush_writes(&mut self) -> io::Result<()> {
+        if !self.pending_write.is_empty() {
+            self.kcp.send(&self.pending_write)?;
+            self.pending_write.clear();
+            self.open_pending = false;
+            self.write_deadline = None;
+        }
+        Ok(())
+    }
+
     pub(crate) fn finish(&mut self) -> io::Result<()> {
         if !self.local_fin {
+            self.flush_writes()?;
             self.flush_open(true)?;
             self.kcp.send(&[FIN])?;
             self.local_fin = true;
@@ -273,17 +312,16 @@ impl AsyncWrite for KcpStream {
             state.writer = Some(cx.waker().clone());
             return Poll::Pending;
         }
-        let count = buf.len().min(WRITE_CHUNK);
-        let mut record = Vec::with_capacity(count + 1);
-        record.push(if state.open_pending { OPEN } else { DATA });
-        record.extend_from_slice(&buf[..count]);
-        match state.kcp.send(&record) {
-            Ok(_) => {
-                state.open_pending = false;
-                self.notify_io(&mut state);
+        let staged = state.pending_write.len().saturating_sub(1);
+        let count = buf.len().min(WRITE_CHUNK - staged);
+        match state.queue_write(&buf[..count]) {
+            Ok(notify) => {
+                if notify {
+                    self.network.io_ready.notify_one();
+                }
                 Poll::Ready(Ok(count))
             }
-            Err(error) => Poll::Ready(Err(error.into())),
+            Err(error) => Poll::Ready(Err(error)),
         }
     }
 
@@ -314,6 +352,10 @@ impl AsyncWrite for KcpStream {
         if let Some(kind) = state.error {
             return Poll::Ready(Err(io::Error::new(kind, "KCP conversation closed")));
         }
+        if state.write_deadline.is_some() {
+            state.flush_writes()?;
+            self.notify_io(&mut state);
+        }
         if state.kcp.wait_snd() == 0 {
             return Poll::Ready(Ok(()));
         }
@@ -337,6 +379,28 @@ impl AsyncWrite for KcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn character_writes_share_one_record_and_one_deadline() {
+        let mut conversation = Conversation::new(1, true).unwrap();
+        let start = Instant::now();
+        assert!(conversation.queue_write(b"h").unwrap());
+        tokio::time::advance(Duration::from_millis(2)).await;
+        for byte in b"ello" {
+            assert!(!conversation.queue_write(&[*byte]).unwrap());
+        }
+        assert_eq!(conversation.write_deadline, Some(start + SMALL_WRITE_DELAY));
+        assert_eq!(conversation.kcp.wait_snd(), 0);
+
+        conversation.flush_writes().unwrap();
+        conversation.kcp.update(0).unwrap();
+        let mut packets = conversation.output.0.lock();
+        assert_eq!(packets.len(), 1);
+        let mut peer = Conversation::new(1, false).unwrap();
+        peer.kcp.input(&packets.pop_front().unwrap()).unwrap();
+        peer.receive_records().unwrap();
+        assert_eq!(peer.received.pop_front().unwrap(), &b"hello"[..]);
+    }
 
     #[test]
     fn first_flight_sends_two_segments_without_an_ack() {

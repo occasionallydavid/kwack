@@ -234,7 +234,9 @@ impl Session {
         Ok(())
     }
 
-    fn update(&mut self, socket: &UdpSocket, elapsed: u32, timer: bool) {
+    fn update(&mut self, socket: &UdpSocket, elapsed: u32, timer: bool) -> Option<Instant> {
+        let now = Instant::now();
+        let mut next_write = None;
         let mut packets = Vec::new();
         {
             let mut conversations = self.state.conversations.lock();
@@ -244,12 +246,20 @@ impl Session {
                 if c.error.is_some() {
                     return false;
                 }
-                let io_pending = std::mem::take(&mut c.io_pending);
+                let write_due = c.write_deadline.is_some_and(|deadline| deadline <= now);
+                if let Some(deadline) = c.write_deadline.filter(|_| !write_due) {
+                    next_write =
+                        Some(next_write.map_or(deadline, |next: Instant| next.min(deadline)));
+                }
+                let io_pending = std::mem::take(&mut c.io_pending) || write_due;
                 if !timer && !io_pending {
                     return true;
                 }
 
                 let mut process = || -> io::Result<()> {
+                    if write_due {
+                        c.flush_writes()?;
+                    }
                     if timer {
                         c.flush_open(false)?;
                     }
@@ -297,6 +307,7 @@ impl Session {
             payload.extend_from_slice(&packet);
             self.send(socket, &payload);
         }
+        next_write
     }
 }
 
@@ -953,6 +964,7 @@ impl Driver {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut buf = [0; 65536];
         let mut drain: Option<Instant> = None;
+        let mut next_write = None;
         loop {
             tokio::select! {
                 command = commands.recv(), if drain.is_none() => match command {
@@ -980,13 +992,21 @@ impl Driver {
                     Ok((len, source)) => self.packet(&buf[..len], source, start.elapsed().as_millis() as u32),
                     Err(error) => { tracing::debug!(%error, "UDP receiver stopped"); break; }
                 },
-                _ = self.io_ready.notified() => {
-                    let elapsed = start.elapsed().as_millis() as u32;
-                    for session in self.sessions.values_mut() {
-                        if session.confirmed && !session.state.is_closed() && !session.crypto.expired() {
-                            session.update(&self.socket, elapsed, false);
+                _ = async {
+                    if let Some(deadline) = next_write {
+                        tokio::select! {
+                            _ = self.io_ready.notified() => {}
+                            _ = tokio::time::sleep_until(deadline) => {}
                         }
+                    } else {
+                        self.io_ready.notified().await;
                     }
+                } => {
+                    let elapsed = start.elapsed().as_millis() as u32;
+                    next_write = self.sessions.values_mut()
+                        .filter(|session| session.confirmed && !session.state.is_closed() && !session.crypto.expired())
+                        .filter_map(|session| session.update(&self.socket, elapsed, false))
+                        .min();
                 },
                 _ = tick.tick() => {
                     self.tick(start.elapsed().as_millis() as u32);

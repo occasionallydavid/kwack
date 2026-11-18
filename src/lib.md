@@ -130,6 +130,8 @@ DATA into a byte stream. OPEN includes the first write's data when available, an
 vectored writes combine HTTP headers and bodies into that record. A conversation
 opened for reading alone sends an empty OPEN after a short scheduling grace period.
 There is no OPEN acknowledgment barrier before sending application data. KCP acknowledges and retransmits all three record types.
+Small writes share a record for up to 2.5 ms from the first write. Reaching 256 bytes,
+explicitly flushing, or shutting down submits the batch immediately.
 `flush()` waits for KCP acknowledgment of queued records; `shutdown()` queues a reliable FIN after pending DATA; it returns without
 waiting for the peer to acknowledge it. A dropped stream queues FIN and permits a bounded drain.
 `Connection::close()` aborts local I/O immediately and sends closure in the

@@ -686,3 +686,33 @@ async fn closing_retries_lost_close_and_ack_and_stops_server_udp() {
             "server sent UDP after acknowledging client close");
     }).await.expect("session close regression test timed out");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn small_writes_arrive_without_an_explicit_flush() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let private = key(230);
+        let public = private.public_key();
+        let mut server = Server::builder(private)
+            .authorize(Box::new(|_| true))
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let client = Client::builder(key(231))
+            .remote(server.local_addr(), public)
+            .connect()
+            .await
+            .unwrap();
+        let mut sender = client.connection().open_stream().await.unwrap();
+        for byte in b"hello" {
+            sender.write_all(&[*byte]).await.unwrap();
+        }
+        let connection = server.accept().await.unwrap();
+        let mut receiver = connection.accept_stream().await.unwrap();
+        let mut data = [0; 5];
+        receiver.read_exact(&mut data).await.unwrap();
+        assert_eq!(&data, b"hello");
+        client.close().await;
+    })
+    .await
+    .expect("batched writes never arrived");
+}
