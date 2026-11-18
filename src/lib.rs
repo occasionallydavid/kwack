@@ -105,28 +105,28 @@ pub type PeerAuthorizer = Box<dyn Fn(PublicKey) -> bool + Send + Sync>;
 /// TLS resumption can skip certificate verification. Disable it in your TLS
 /// configuration if you need the callback to run for each new connection.
 pub struct Verifier {
-    authorize_peer: Option<PeerAuthorizer>,
+    is_authorized: Option<PeerAuthorizer>,
 }
 
 impl fmt::Debug for Verifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Verifier")
-            .field("has_authorizer", &self.authorize_peer.is_some())
+            .field("has_authorizer", &self.is_authorized.is_some())
             .finish()
     }
 }
 
 impl Verifier {
     /// Creates a verifier with the supplied peer admission policy.
-    pub fn new(authorize_peer: Option<PeerAuthorizer>) -> Self {
-        Self { authorize_peer }
+    pub fn new(is_authorized: Option<PeerAuthorizer>) -> Self {
+        Self { is_authorized }
     }
 
     fn admit(&self, leaf: &EndEntityCert<'_>) -> Result<(), rustls::Error> {
         let peer = leaf_public_key(leaf)?;
         if self
-            .authorize_peer
+            .is_authorized
             .as_ref()
             .is_some_and(|allow| !allow(peer))
         {
@@ -172,7 +172,7 @@ impl Verifier {
 
 impl ClientCertVerifier for Verifier {
     fn client_auth_mandatory(&self) -> bool {
-        self.authorize_peer.is_some()
+        self.is_authorized.is_some()
     }
 
     fn root_hint_subjects(&self) -> &[Name] {
