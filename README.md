@@ -22,6 +22,14 @@ certificate signatures, validity dates, and TLS purpose. Server verification
 also checks the supplied name against the SAN. To revoke a pin, replace the
 verifier and close any existing sessions for that key.
 
+## Run the examples
+
+- `cargo run --example mtls` starts a client and server on loopback with freshly
+  generated keys, authenticates both peers with public-key pins, and sends a
+  message over a QUIC stream.
+- `cargo run --example keygen` prints a new base64 PKCS #8 private key, its raw
+  public key, and its certificate. The first line is secret.
+
 ## Use with rustls
 
 The example uses rustls with its `ring` feature. Kwack's library API only
