@@ -13,6 +13,12 @@ use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName as Name,
 use webpki::ring::ED25519;
 use webpki::{EndEntityCert, KeyUsage, anchor_from_trusted_cert};
 
+#[cfg(feature = "axum")]
+pub mod axum;
+
+#[cfg(feature = "reqwest")]
+pub mod reqwest;
+
 /// An invalid key, base64 value, or certificate generation error.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -113,13 +119,7 @@ impl Verifier {
             return Err(CertificateError::UnknownIssuer.into());
         }
         let leaf = EndEntityCert::try_from(certificate).map_err(invalid_cert)?;
-        let spki = leaf.subject_public_key_info();
-        let key: &[u8; 32] = spki
-            .as_ref()
-            .strip_prefix(ED25519_SPKI_PREFIX)
-            .and_then(|raw| raw.try_into().ok())
-            .ok_or(CertificateError::BadEncoding)?;
-        if !self.keys.contains(key) {
+        if !self.keys.contains(&leaf_public_key(&leaf)?) {
             return Err(CertificateError::UnknownIssuer.into());
         }
 
@@ -220,6 +220,14 @@ impl ServerCertVerifier for Verifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         vec![SignatureScheme::ED25519]
     }
+}
+
+fn leaf_public_key(leaf: &EndEntityCert<'_>) -> Result<[u8; 32], CertificateError> {
+    leaf.subject_public_key_info()
+        .as_ref()
+        .strip_prefix(ED25519_SPKI_PREFIX)
+        .and_then(|raw| raw.try_into().ok())
+        .ok_or(CertificateError::BadEncoding)
 }
 
 fn invalid_cert(error: webpki::Error) -> rustls::Error {

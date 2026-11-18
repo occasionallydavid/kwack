@@ -1,6 +1,6 @@
 # kwack
 
-Two helpers for Ed25519 mutual TLS with rustls and quinn.
+Ed25519 mutual TLS helpers for rustls, with optional HTTP/3 integrations for Axum and reqwest.
 
 - `Identity` takes a base64 Ed25519 private key and generates a deterministic
   self-signed X.509 certificate. It accepts a raw 32-byte seed or PKCS #8 DER.
@@ -22,34 +22,43 @@ certificate signatures, validity dates, and TLS purpose. Server verification
 also checks the supplied name against the SAN. To revoke a pin, replace the
 verifier and close any existing sessions for that key.
 
+## Optional HTTP/3 helpers
+
+Enable the `reqwest` feature for `kwack::reqwest::client(private_key, accepted_keys)`.
+It returns a reqwest client with the server allowlist installed. Select HTTP/3 with
+`.version(reqwest::Version::HTTP_3)` on the request. The `client_builder` variant
+lets you set a timeout or map the generated server name `a` to a socket address.
+
+Enable the `axum` feature for
+`kwack::axum::serve(router, private_key, accepted_keys)?.bind(addr)?.run().await`.
+Handlers can extract `axum::Extension<kwack::axum::PeerIdentity>` to get the
+authenticated client key as raw bytes or base64.
+
+Reqwest requires the compiler flag `--cfg reqwest_unstable` for HTTP/3.
+This repository sets it in `.cargo/config.toml`. Set it in your application's
+Cargo config or `RUSTFLAGS` when enabling kwack's `reqwest` feature.
+
 ## Run the examples
 
-The Axum server takes a UDP bind address and one or more allowed client public
-keys. The reqwest client takes the server address, its public-key pin, and an
-optional message to send to `POST /echo` over HTTP/3. Each reads its private
-key from `KWACK_PRIVATE_KEY`.
-
-The repository's Cargo config enables reqwest's required `reqwest_unstable`
-flag for HTTP/3. If you set your own `RUSTFLAGS`, include
-`--cfg reqwest_unstable` when building the examples.
-
-Run these commands in Bash to generate two key pairs and try the examples:
+The server takes a private key, a UDP bind address, and one or more accepted
+client public keys. The client takes a private key, a server address, the
+server's public key, and an optional message to send to `POST /echo`.
 
 ```bash
 mapfile -t server_keys < <(cargo run --quiet --example keygen)
 mapfile -t client_keys < <(cargo run --quiet --example keygen)
 
-KWACK_PRIVATE_KEY="${server_keys[0]#private_key=}" \
-  cargo run --quiet --example server -- 127.0.0.1:4433 "${client_keys[1]#public_key=}" &
+cargo run --quiet --features axum --example server -- \
+  "${server_keys[0]#private_key=}" 127.0.0.1:4433 "${client_keys[1]#public_key=}" &
 server_pid=$!
 # Wait for the server to print its listening address before running the client.
-KWACK_PRIVATE_KEY="${client_keys[0]#private_key=}" \
-  cargo run --quiet --example client -- 127.0.0.1:4433 "${server_keys[1]#public_key=}"
+cargo run --quiet --features reqwest --example client -- \
+  "${client_keys[0]#private_key=}" 127.0.0.1:4433 "${server_keys[1]#public_key=}"
 kill "$server_pid"
 ```
 
-`keygen` prints a base64 PKCS #8 private key and a base64 public key.
-The first line is secret.
+These examples accept private keys on the command line. Use disposable keys
+because command lines can be visible to other processes.
 
 ## Use with rustls
 

@@ -1,18 +1,13 @@
-use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use kwack::{Error, Identity, Verifier};
+use kwack::Error;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(5), exchange()).await?
-}
-
-async fn exchange() -> Result<(), Error> {
-    let mut args = env::args().skip(1);
-    let usage = "usage: KWACK_PRIVATE_KEY=... client SERVER_ADDRESS SERVER_PUBLIC_KEY [MESSAGE]";
+    let mut args = std::env::args().skip(1);
+    let usage = "usage: client PRIVATE_KEY SERVER_ADDRESS SERVER_PUBLIC_KEY [MESSAGE]";
+    let private_key = args.next().ok_or(usage)?;
     let server: SocketAddr = args.next().ok_or(usage)?.parse()?;
     let server_public = args.next().ok_or(usage)?;
     let message = args
@@ -22,26 +17,13 @@ async fn exchange() -> Result<(), Error> {
         return Err(usage.into());
     }
 
-    let (chain, key) = Identity::from_private_key(&env::var("KWACK_PRIVATE_KEY")?)?.into_rustls();
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Verifier::new([server_public])?))
-        .with_client_auth_cert(chain, key)?;
-    tls.alpn_protocols = vec![b"h3".to_vec()];
-
-    // Resolve the certificate's DNS name to the user-supplied UDP endpoint.
-    let client = reqwest::Client::builder()
-        .use_preconfigured_tls(tls)
-        .http3_prior_knowledge()
-        .no_proxy()
+    let client = kwack::reqwest::client_builder(&private_key, &[server_public])?
         .resolve("a", server)
+        .timeout(Duration::from_secs(5))
         .build()?;
     let reply = client
         .post(format!("https://a:{}/echo", server.port()))
         .version(reqwest::Version::HTTP_3)
-        .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(message)
         .send()
         .await?
