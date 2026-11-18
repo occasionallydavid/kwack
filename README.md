@@ -1,68 +1,64 @@
 # kwack
 
-Authenticated reliable byte streams and Tower/HTTP services over UDP.
-**Noise IKpsk2 is the outer protocol; KCP is the inner protocol.**
+Two helpers for Ed25519 mutual TLS with rustls and quinn.
 
-```text
-Tower / Axum / Hyper HTTP/1.1 ↔ KCP conversations ↔ Noise IKpsk2 ↔ UDP
+- `Identity` takes a base64 Ed25519 private key and generates a deterministic
+  self-signed X.509 certificate. It accepts a raw 32-byte seed or PKCS #8 DER.
+- `Verifier` takes an allowlist of base64 Ed25519 public keys. It accepts raw
+  32-byte keys or SubjectPublicKeyInfo DER and implements both rustls verifier
+  traits. An empty list denies every peer.
+
+Use standard padded base64. Ed25519 is a signing key format and is distinct
+from the X25519 keys used by WireGuard.
+
+The generated certificate has DNS name `a` and fixed validity from
+2000-01-01 to 2049-01-01 UTC. The same key produces the same certificate with
+the same generation profile. A certificate can also be exported as base64 DER
+with `certificate_base64()`.
+
+A peer must present a self-signed Ed25519 leaf whose public key is in the
+allowlist and prove possession of the private key in TLS. The verifier checks
+certificate signatures, validity dates, and TLS purpose. Server verification
+also checks the supplied name against the SAN. To revoke a pin, replace the
+verifier and close any existing sessions for that key.
+
+## Use with rustls
+
+The example uses rustls with its `ring` feature. Kwack's library API only
+depends on rustls for the types and verifier traits. Quinn owns the transport.
+Convert the resulting TLS configurations with `QuicClientConfig::try_from`
+and `QuicServerConfig::try_from` when using quinn.
+
+```rust
+use std::sync::Arc;
+use kwack::{Identity, Verifier};
+
+fn tls_configs(
+    client_private: &str,
+    server_private: &str,
+    allowed_clients: &[String],
+    allowed_servers: &[String],
+) -> Result<(rustls::ClientConfig, rustls::ServerConfig), kwack::Error> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let (client_chain, client_key) = Identity::from_private_key(client_private)?.into_rustls();
+    let (server_chain, server_key) = Identity::from_private_key(server_private)?.into_rustls();
+
+    let mut client = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Verifier::new(allowed_servers)?))
+        .with_client_auth_cert(client_chain, client_key)?;
+
+    let mut server = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_client_cert_verifier(Arc::new(Verifier::new(allowed_clients)?))
+        .with_single_cert(server_chain, server_key)?;
+
+    client.alpn_protocols = vec![b"my-app".to_vec()];
+    server.alpn_protocols = client.alpn_protocols.clone();
+    Ok((client, server))
+}
 ```
 
-Each endpoint has an X25519 key pair. Clients pin server public keys; servers
-explicitly authorize client public keys. A public-key opening MAC keeps the
-listener silent to senders who do not know its public key. Multiple independent
-KCP conversations share an authenticated Noise session. Each conversation is a
-Tokio `AsyncRead`/`AsyncWrite` stream with reliable retransmission and half-close.
-No fake IP framing, TUN device, OS routes, root access, QUIC, or TLS.
-
-The generic Tower service adapter accepts Axum routers and inserts authenticated
-`PeerIdentity` into every HTTP request. Hyper carries streaming HTTP/1.1 request
-and response bodies over separate KCP conversations. Key encoding remains
-compatible with WireGuard's base64 key format; the network protocol is kwack's.
-
-See [the API guide](src/lib.md) for builders, stream APIs, wire format, resource
-limits, automatic fresh-DH rekeying every two minutes, and current limitations.
-
-## Run the examples
-
-Generate two key pairs in Bash. The examples accept private keys directly:
-
-```sh
-read -r SERVER_PRIVATE SERVER_PUBLIC < <(cargo run --quiet --example keygen)
-read -r CLIENT_PRIVATE CLIENT_PUBLIC < <(cargo run --quiet --example keygen)
-printf 'Server public key: %s\nClient public key: %s\n' "$SERVER_PUBLIC" "$CLIENT_PUBLIC"
-```
-
-Start the Axum server:
-
-```sh
-cargo run --example server -- "$SERVER_PRIVATE" "$CLIENT_PUBLIC"
-```
-
-In another terminal, set the client private key and server public key to the
-values above, then run:
-
-```sh
-cargo run --example client -- "$CLIENT_PRIVATE" 127.0.0.1:4433 "$SERVER_PUBLIC" /whoami
-```
-
-`/whoami` returns the authenticated client public key, `/` returns a greeting,
-and `POST /echo` echoes the request body. `BIND_ADDR` changes the listener.
-Additional server arguments authorize additional client public keys.
-Ctrl-C shuts down the server.
-
-## Development
-
-```sh
-cargo +nightly fmt --check
-cargo check --no-default-features --lib
-cargo test --all-targets
-cargo test --doc
-cargo clippy --all-targets -- -D warnings
-```
-
-Tests cover public-key authentication and pinning, PSKs, independent conversations,
-HTTP/Tower readiness and identity, revocation, replay rejection, retransmission,
-packet loss/reordering, endpoint roaming, and stream shutdown/draining.
-
-Uses [noise-protocol / noise-rust-crypto](https://github.com/sopium/noise-rust)
-and [kcp](https://github.com/Matrix-Zhang/kcp) from crates.io. No crypto fork.
+When connecting to a server using the generated certificate, pass `"a"` as
+quinn's server name. It can be different from the host's DNS name or address.
