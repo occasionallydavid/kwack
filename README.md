@@ -69,74 +69,9 @@ Reqwest requires the compiler flag `--cfg reqwest_unstable` for HTTP/3.
 This repository sets it in `.cargo/config.toml`. Set it in your application's
 Cargo config or `RUSTFLAGS` when enabling kwack's `reqwest` feature.
 
-## Run the examples
+## Examples
 
-The server takes a private key, a UDP bind address, and optional client public
-keys. The client takes a private key, a server address, the server's public
-key, and an optional message to send to `POST /echo`. To try an anonymous
-request, start the server with no client public keys and pass `-` as the
-client private key. The client then sends the message to `POST /optional-echo`.
-`keygen` prints `PRIVATE_KEY="..."` and `PUBLIC_KEY="..."` with base64 values.
-
-```bash
-mapfile -t server_keys < <(cargo run --quiet --example keygen | cut -d '"' -f 2)
-mapfile -t client_keys < <(cargo run --quiet --example keygen | cut -d '"' -f 2)
-
-cargo run --quiet --features axum --example server -- \
-  "${server_keys[0]}" 127.0.0.1:4433 "${client_keys[1]}" &
-server_pid=$!
-# Wait for the server to print its listening address before running the client.
-cargo run --quiet --features reqwest --example client -- \
-  "${client_keys[0]}" 127.0.0.1:4433 "${server_keys[1]}"
-kill "$server_pid"
-```
-
-These examples accept private keys on the command line. Use disposable keys
-because command lines can be visible to other processes.
-
-## Use with rustls
-
-The example uses rustls with its `ring` feature. Kwack's library API only
-depends on rustls for the types and verifier traits. Quinn owns the transport.
-Convert the resulting TLS configurations with `QuicClientConfig::try_from`
-and `QuicServerConfig::try_from` when using quinn.
-
-```rust
-use std::sync::Arc;
-use kwack::{Identity, Verifier};
-
-fn tls_configs(
-    client_private: &str,
-    server_private: &str,
-    allowed_client: [u8; 32],
-    allowed_server: [u8; 32],
-) -> Result<(rustls::ClientConfig, rustls::ServerConfig), kwack::Error> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let (client_chain, client_key) = Identity::from_private_key(client_private)?.into_rustls();
-    let (server_chain, server_key) = Identity::from_private_key(server_private)?.into_rustls();
-
-    let mut client = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Verifier::new(Some(Box::new(
-            move |peer| peer.raw() == allowed_server,
-        )))))
-        .with_client_auth_cert(client_chain, client_key)?;
-
-    let mut server = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_client_cert_verifier(Arc::new(Verifier::new(Some(Box::new(
-            move |peer| peer.raw() == allowed_client,
-        )))))
-        .with_single_cert(server_chain, server_key)?;
-
-    client.alpn_protocols = vec![b"my-app".to_vec()];
-    server.alpn_protocols = client.alpn_protocols.clone();
-    client.resumption = rustls::client::Resumption::disabled();
-    server.send_tls13_tickets = 0;
-    Ok((client, server))
-}
-```
-
-When connecting to a server using the generated certificate, pass `"a"` as
-quinn's server name. It can be different from the host's DNS name or address.
+- [client.rs](examples/client.rs) sends an HTTP/3 request with reqwest.
+- [server.rs](examples/server.rs) serves Axum routes with required or optional client identity.
+- [rustls.rs](examples/rustls.rs) configures mutual TLS directly in rustls.
+- [keygen.rs](examples/keygen.rs) generates a Base64 Ed25519 key pair.
