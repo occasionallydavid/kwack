@@ -29,6 +29,14 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio"], 
 base64 = { version = "0.22", default-features = false, features = ["std"] }
 parking_lot = { version = "0.12", default-features = false }
 
+[profile.production]
+inherits = "release"
+codegen-units = 1
+opt-level = "z"  # Optimize for size.
+lto = "fat"
+strip = true  # Automatically strip symbols from the binary.
+panic = "abort"
+
 [features]
 default = ["http"]
 http = ["client", "server"]
