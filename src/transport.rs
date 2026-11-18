@@ -7,7 +7,7 @@ use std::{fmt, io};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -206,7 +206,7 @@ impl Session {
         closing.complete();
     }
 
-    fn segment(&mut self, segment: &[u8]) -> io::Result<()> {
+    fn segment(&mut self, segment: &[u8], elapsed: u32) -> io::Result<()> {
         if segment.len() < kcp::KCP_OVERHEAD {
             return Err(io::Error::other("truncated KCP segment"));
         }
@@ -225,12 +225,16 @@ impl Session {
             self.remote_convs.insert(u64::from(id / 2));
         }
         if let Some(conversation) = conversations.get(&id) {
-            conversation.lock().kcp.input(segment)?;
+            let mut conversation = conversation.lock();
+            conversation.io_pending = true;
+            // KCP measures ACK latency against the clock set by update().
+            conversation.kcp.update(elapsed)?;
+            conversation.kcp.input(segment)?;
         }
         Ok(())
     }
 
-    fn update(&mut self, socket: &UdpSocket, elapsed: u32) {
+    fn update(&mut self, socket: &UdpSocket, elapsed: u32, timer: bool) {
         let mut packets = Vec::new();
         {
             let mut conversations = self.state.conversations.lock();
@@ -240,11 +244,24 @@ impl Session {
                 if c.error.is_some() {
                     return false;
                 }
-                if let Err(error) = c
-                    .flush_open(false)
-                    .and_then(|_| c.kcp.update(elapsed).map_err(io::Error::from))
-                    .and_then(|_| c.receive_records())
-                {
+                let io_pending = std::mem::take(&mut c.io_pending);
+                if !timer && !io_pending {
+                    return true;
+                }
+
+                let mut process = || -> io::Result<()> {
+                    if timer {
+                        c.flush_open(false)?;
+                    }
+                    c.receive_records()?;
+                    c.kcp.update(elapsed)?;
+                    // update() can defer its flush until the next protocol tick.
+                    if io_pending {
+                        c.kcp.flush()?;
+                    }
+                    Ok(())
+                };
+                if let Err(error) = process() {
                     c.fail(error.kind());
                     return false;
                 }
@@ -292,6 +309,7 @@ enum Command {
 }
 
 pub(crate) struct Network {
+    pub(crate) io_ready: Arc<Notify>,
     local: SocketAddr,
     command: mpsc::Sender<Command>,
     rejected: Mutex<Option<mpsc::Receiver<RejectedDatagram>>>,
@@ -542,7 +560,7 @@ impl Connection {
         conversations.insert(id, inner.clone());
         Ok(KcpStream {
             inner,
-            _network: self.network.clone(),
+            network: self.network.clone(),
         })
     }
 
@@ -555,7 +573,7 @@ impl Connection {
             stream = async { self.state.accepted.lock().await.recv().await } => {
                 let inner = stream.ok_or_else(broken_pipe)?;
                 if self.state.is_closed() { return Err(broken_pipe().into()); }
-                Ok(KcpStream { inner, _network: self.network.clone() })
+                Ok(KcpStream { inner, network: self.network.clone() })
             }
             _ = closed.wait_for(|value| *value) => Err(broken_pipe().into()),
         }
@@ -654,7 +672,9 @@ fn start(
     if let Some(session) = initial {
         sessions.insert(session.id, session);
     }
+    let io_ready = Arc::new(Notify::new());
     let driver = Driver {
+        io_ready: io_ready.clone(),
         socket,
         local,
         config,
@@ -668,6 +688,7 @@ fn start(
     let driver = tokio::spawn(driver.run(commands));
     Ok((
         Arc::new(Network {
+            io_ready,
             local,
             command,
             rejected: Mutex::new(Some(rejections)),
@@ -678,6 +699,7 @@ fn start(
 }
 
 struct Driver {
+    io_ready: Arc<Notify>,
     socket: UdpSocket,
     local: SocketAddr,
     config: Option<ServerBuilder>,
@@ -747,7 +769,7 @@ impl Driver {
         self.sessions.insert(id, session);
     }
 
-    fn packet(&mut self, packet: &[u8], source: SocketAddr) {
+    fn packet(&mut self, packet: &[u8], source: SocketAddr, elapsed: u32) {
         if packet.len() < crypto::HEADER || &packet[..4] != crypto::MAGIC {
             self.reject(packet, source, RejectionReason::UnknownProtocol);
             return;
@@ -840,9 +862,10 @@ impl Driver {
                     }
                     [crypto::PONG] if session.confirmed => {}
                     [crypto::SEGMENT, segment @ ..] if session.confirmed => {
-                        if let Err(error) = session.segment(segment) {
+                        if let Err(error) = session.segment(segment, elapsed) {
                             tracing::debug!(%error, "invalid authenticated KCP segment");
                         }
+                        session.update(&self.socket, elapsed, false);
                     }
                     _ => {}
                 }
@@ -909,7 +932,7 @@ impl Driver {
                         return true;
                     }
                 }
-                session.update(&self.socket, elapsed);
+                session.update(&self.socket, elapsed, true);
                 if session.last_ping.elapsed() >= Duration::from_secs(10) {
                     session.send(&self.socket, &[crypto::PING]);
                     session.last_ping = Instant::now();
@@ -952,8 +975,16 @@ impl Driver {
                     None => drain = Some(Instant::now()),
                 },
                 received = self.socket.recv_from(&mut buf) => match received {
-                    Ok((len, source)) => self.packet(&buf[..len], source),
+                    Ok((len, source)) => self.packet(&buf[..len], source, start.elapsed().as_millis() as u32),
                     Err(error) => { tracing::debug!(%error, "UDP receiver stopped"); break; }
+                },
+                _ = self.io_ready.notified() => {
+                    let elapsed = start.elapsed().as_millis() as u32;
+                    for session in self.sessions.values_mut() {
+                        if session.confirmed && !session.state.is_closed() && !session.crypto.expired() {
+                            session.update(&self.socket, elapsed, false);
+                        }
+                    }
                 },
                 _ = tick.tick() => {
                     self.tick(start.elapsed().as_millis() as u32);

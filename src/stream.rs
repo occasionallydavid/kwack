@@ -56,6 +56,7 @@ pub(crate) struct Conversation {
     pub(crate) local_fin: bool,
     pub(crate) remote_fin: bool,
     pub(crate) error: Option<io::ErrorKind>,
+    pub(crate) io_pending: bool,
     received: VecDeque<Bytes>,
     received_bytes: usize,
     reader: Option<Waker>,
@@ -83,6 +84,7 @@ impl Conversation {
             local_fin: false,
             remote_fin: false,
             error: None,
+            io_pending: false,
             received: VecDeque::new(),
             received_bytes: 0,
             reader: None,
@@ -183,10 +185,15 @@ impl Conversation {
 /// Other conversations on the Noise session have their own KCP state and windows.
 pub struct KcpStream {
     pub(crate) inner: Arc<Mutex<Conversation>>,
-    pub(crate) _network: Arc<Network>,
+    pub(crate) network: Arc<Network>,
 }
 
 impl KcpStream {
+    fn notify_io(&self, state: &mut Conversation) {
+        state.io_pending = true;
+        self.network.io_ready.notify_one();
+    }
+
     /// KCP conversation number, unique within this Noise session.
     pub fn conversation_id(&self) -> u32 {
         self.inner.lock().kcp.conv()
@@ -208,6 +215,7 @@ impl Drop for KcpStream {
         state.dropped = Some(Instant::now());
         state.received.clear();
         state.received_bytes = 0;
+        self.notify_io(&mut state);
         // Network's destructor keeps the UDP task running for a bounded drain.
     }
 }
@@ -226,7 +234,11 @@ impl AsyncRead for KcpStream {
             let count = bytes.len().min(buf.remaining());
             buf.put_slice(&bytes[..count]);
             bytes.advance(count);
+            let was_full = state.received_bytes >= RECEIVE_BUFFER;
             state.received_bytes -= count;
+            if was_full && state.received_bytes < RECEIVE_BUFFER {
+                self.notify_io(&mut state);
+            }
             if !bytes.is_empty() {
                 state.received.push_front(bytes);
             }
@@ -267,6 +279,7 @@ impl AsyncWrite for KcpStream {
         match state.kcp.send(&record) {
             Ok(_) => {
                 state.open_pending = false;
+                self.notify_io(&mut state);
                 Poll::Ready(Ok(count))
             }
             Err(error) => Poll::Ready(Err(error.into())),
@@ -312,6 +325,10 @@ impl AsyncWrite for KcpStream {
         if let Some(kind) = state.error {
             return Poll::Ready(Err(io::Error::new(kind, "KCP conversation closed")));
         }
-        Poll::Ready(state.finish())
+        let result = state.finish();
+        if result.is_ok() {
+            self.notify_io(&mut state);
+        }
+        Poll::Ready(result)
     }
 }

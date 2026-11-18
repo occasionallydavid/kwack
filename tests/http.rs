@@ -436,11 +436,24 @@ async fn first_request_body_follows_noise_response_without_extra_roundtrips() {
         let body = Bytes::from(vec![0x78; 319]);
         let request = Request::builder().method("POST").uri("/echo").header("host", "kwack")
             .body(Full::new(body.clone())).unwrap();
+        // Keep Tokio from auto-advancing its paused clock while UDP and HTTP
+        // tasks run. The wall-clock bound lets a timer-dependent regression fail.
+        tokio::time::pause();
+        let before = tokio::time::Instant::now();
+        let clock_guard = tasks.spawn(async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                tokio::task::yield_now().await;
+            }
+        });
         let response = client.send(request).await.unwrap();
         assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), body);
         let (length, responses_before_data) = first_seen.await.unwrap();
         assert_eq!(responses_before_data, 1, "only the Noise response may precede the request");
         assert!(length >= 319 + 70, "the first KCP packet must include the body, not just OPEN or HTTP headers");
+        assert_eq!(before.elapsed(), Duration::ZERO, "HTTP exchange waited for a transport timer");
+        clock_guard.abort();
+        tokio::time::resume();
         client.close().await;
     }).await.expect("one-RTT startup test timed out");
 }
