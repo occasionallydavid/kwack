@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::post;
-use kwack::{Error, PeerAuthorizer, PeerIdentity};
+use kwack::{Error, PeerAuthorizer, PublicKey};
+
+mod support;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -12,12 +14,12 @@ async fn main() -> Result<(), Error> {
     let private_key = args.next().ok_or(usage)?;
     let address = args.next().ok_or(usage)?.parse()?;
     let accepted_keys = args
-        .map(|key| PeerIdentity::from_public_key_base64(&key))
+        .map(|key| support::parse_public_key(&key))
         .collect::<Result<HashSet<_>, _>>()?;
     let authorize_client: Option<PeerAuthorizer> = if accepted_keys.is_empty() {
         None
     } else {
-        Some(Box::new(move |peer| accepted_keys.contains(&peer)))
+        Some(Box::new(move |peer| accepted_keys.contains(&peer.raw())))
     };
 
     let router = Router::new()
@@ -30,14 +32,14 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn echo(peer: PeerIdentity, body: String) -> String {
-    eprintln!("request from {}", peer.public_key_base64());
+async fn echo(peer: PublicKey, body: String) -> String {
+    eprintln!("request from {}", peer.encoded());
     body
 }
 
-async fn optional_echo(peer: Option<PeerIdentity>, body: String) -> String {
+async fn optional_echo(peer: Option<PublicKey>, body: String) -> String {
     match peer {
-        Some(peer) => eprintln!("request from {}", peer.public_key_base64()),
+        Some(peer) => eprintln!("request from {}", peer.encoded()),
         None => eprintln!("anonymous request"),
     }
     body

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kwack::{Identity, PeerAuthorizer, PeerIdentity};
+use kwack::{Identity, PeerAuthorizer, PublicKey};
 
 fn keys(seed: u8) -> (String, String) {
     let private = STANDARD.encode([seed; 32]);
@@ -15,8 +15,12 @@ fn keys(seed: u8) -> (String, String) {
 }
 
 fn pin(key: &str) -> PeerAuthorizer {
-    let expected = PeerIdentity::from_public_key_base64(key).unwrap();
-    Box::new(move |peer| peer == expected)
+    let expected = raw_key(key);
+    Box::new(move |peer| peer.raw() == expected)
+}
+
+fn raw_key(key: &str) -> [u8; 32] {
+    STANDARD.decode(key).unwrap().try_into().unwrap()
 }
 
 #[tokio::test]
@@ -32,11 +36,11 @@ async fn tower_service_reads_authenticated_identity_from_request_extensions() {
     let (server_key, server_pin) = keys(1);
     let (client_key, client_pin) = keys(2);
     let service = service_fn(|request: Request<RequestBody>| async move {
-        let peer = *request.extensions().get::<PeerIdentity>().unwrap();
+        let peer = *request.extensions().get::<PublicKey>().unwrap();
         let bytes = request.into_body().collect().await.unwrap().to_bytes();
         Ok::<_, Infallible>(
             Response::builder()
-                .header("x-authenticated-key", peer.public_key_base64())
+                .header("x-authenticated-key", peer.encoded())
                 .body(Full::new(bytes))
                 .unwrap(),
         )
@@ -84,16 +88,16 @@ async fn axum_extracts_the_authenticated_clients_key() {
     let (other_key, _) = keys(4);
     let router = Router::new().route(
         "/whoami",
-        get(|peer: PeerIdentity| async move { peer.public_key_base64() }),
+        get(|peer: PublicKey| async move { peer.encoded() }),
     );
-    let first_identity = PeerIdentity::from_public_key_base64(&first_pin).unwrap();
-    let second_identity = PeerIdentity::from_public_key_base64(&second_pin).unwrap();
+    let first_identity = raw_key(&first_pin);
+    let second_identity = raw_key(&second_pin);
     let admit_first = Arc::new(AtomicBool::new(true));
     let policy = {
         let admit_first = admit_first.clone();
-        move |peer| {
-            peer == second_identity
-                || (peer == first_identity && admit_first.load(Ordering::Relaxed))
+        move |peer: PublicKey| {
+            let key = peer.raw();
+            key == second_identity || (key == first_identity && admit_first.load(Ordering::Relaxed))
         }
     };
     let listener = kwack::server::serve(router, &server_key, Some(Box::new(policy)))
@@ -144,12 +148,12 @@ async fn open_server_supports_anonymous_and_identified_requests() {
     let router = Router::new()
         .route(
             "/required",
-            get(|peer: PeerIdentity| async move { peer.public_key_base64() }),
+            get(|peer: PublicKey| async move { peer.encoded() }),
         )
         .route(
             "/optional",
-            get(|peer: Option<PeerIdentity>| async move {
-                peer.map_or_else(|| "anonymous".into(), |peer| peer.public_key_base64())
+            get(|peer: Option<PublicKey>| async move {
+                peer.map_or_else(|| "anonymous".into(), |peer| peer.encoded())
             }),
         );
     let listener = kwack::server::serve(router, &server_key, None)

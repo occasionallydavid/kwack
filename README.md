@@ -14,15 +14,15 @@ TLS:
   in when its key passes your admission policy and it proves it holds the
   private key.
 - The optional Tower server puts the authenticated key in each request as
-  `PeerIdentity`. Your service can use it to decide who can do what.
+  `PublicKey`. Your service can use it to decide who can do what.
 - The optional reqwest helper builds an HTTP/3 mTLS client from its private
   key and the server public keys it trusts.
 
 ## Certificate and key formats
 
 Use standard padded base64. Ed25519 is a signing key format and is distinct
-from the X25519 keys used by WireGuard. `PeerIdentity::from_public_key_base64`
-accepts raw 32-byte public keys or SubjectPublicKeyInfo DER.
+from the X25519 keys used by WireGuard. `PublicKey::raw()` returns the
+32-byte Ed25519 key, and `PublicKey::encoded()` returns its base64 string.
 
 The generated certificate has DNS name `a` and fixed validity from
 2000-01-01 to 2049-01-01 UTC. The same key produces the same certificate with
@@ -33,7 +33,7 @@ The verifier checks certificate signatures, validity dates, and TLS purpose.
 When verifying a server it also checks the requested name against the SAN.
 
 `Verifier::new` takes an optional `PeerAuthorizer`, a boxed
-`Fn(PeerIdentity) -> bool + Send + Sync`. The callback can compare a single
+`Fn(PublicKey) -> bool + Send + Sync`. The callback can compare a single
 key or consult shared policy state. Returning `false` rejects the handshake.
 On the server, `None` accepts any valid self-signed Ed25519 client certificate
 and allows anonymous clients. On the client, `None` accepts any valid
@@ -56,14 +56,14 @@ Enable `server` for
 `kwack::server::serve(service, private_key, authorize_client)?.bind(addr)?.run().await`.
 Pass a Tower service that accepts `http::Request<kwack::server::RequestBody>`
 and returns an HTTP response with a byte body. An identified client request
-carries its authenticated key in `request.extensions().get::<PeerIdentity>()`.
+carries its authenticated key in `request.extensions().get::<PublicKey>()`.
 
-The `axum` feature implies `server` and adds a direct `PeerIdentity` extractor
+The `axum` feature implies `server` and adds a direct `PublicKey` extractor
 for Axum handlers. An Axum router is a Tower service, so the same `serve`
-function accepts it. Use `peer: PeerIdentity` to require an identity and
-return HTTP 401 when absent, or `peer: Option<PeerIdentity>` to also handle
+function accepts it. Use `peer: PublicKey` to require an identity and
+return HTTP 401 when absent, or `peer: Option<PublicKey>` to also handle
 anonymous requests. You can also read the extension with
-`axum::Extension<PeerIdentity>`.
+`axum::Extension<PublicKey>`.
 
 Reqwest requires the compiler flag `--cfg reqwest_unstable` for HTTP/3.
 This repository sets it in `.cargo/config.toml`. Set it in your application's
@@ -103,13 +103,13 @@ and `QuicServerConfig::try_from` when using quinn.
 
 ```rust
 use std::sync::Arc;
-use kwack::{Identity, PeerIdentity, Verifier};
+use kwack::{Identity, Verifier};
 
 fn tls_configs(
     client_private: &str,
     server_private: &str,
-    allowed_client: PeerIdentity,
-    allowed_server: PeerIdentity,
+    allowed_client: [u8; 32],
+    allowed_server: [u8; 32],
 ) -> Result<(rustls::ClientConfig, rustls::ServerConfig), kwack::Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let (client_chain, client_key) = Identity::from_private_key(client_private)?.into_rustls();
@@ -119,14 +119,14 @@ fn tls_configs(
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Verifier::new(Some(Box::new(
-            move |peer| peer == allowed_server,
+            move |peer| peer.raw() == allowed_server,
         )))))
         .with_client_auth_cert(client_chain, client_key)?;
 
     let mut server = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(Verifier::new(Some(Box::new(
-            move |peer| peer == allowed_client,
+            move |peer| peer.raw() == allowed_client,
         )))))
         .with_single_cert(server_chain, server_key)?;
 

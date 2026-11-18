@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use std::{fmt, io};
+use std::fmt;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -77,50 +77,24 @@ impl Identity {
 
 /// The Ed25519 public key presented by a TLS peer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PeerIdentity([u8; 32]);
+pub struct PublicKey([u8; 32]);
 
-impl PeerIdentity {
-    /// Parses standard base64 containing a raw key or SubjectPublicKeyInfo DER.
-    pub fn from_public_key_base64(public_key: &str) -> Result<Self, Error> {
-        let key = STANDARD.decode(public_key.trim())?;
-        let raw = if key.len() == 32 {
-            key.as_slice()
-        } else {
-            key.strip_prefix(ED25519_SPKI_PREFIX).unwrap_or_default()
-        };
-        let key = raw.try_into().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "expected an Ed25519 public key",
-            )
-        })?;
-        Ok(Self(key))
-    }
-
+impl PublicKey {
     /// Returns the raw Ed25519 public key.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
+    pub fn raw(&self) -> [u8; 32] {
+        self.0
     }
 
     /// Returns the standard base64 encoding of the raw Ed25519 public key.
-    pub fn public_key_base64(&self) -> String {
+    pub fn encoded(&self) -> String {
         STANDARD.encode(self.0)
-    }
-
-    fn from_leaf(leaf: &EndEntityCert<'_>) -> Result<Self, CertificateError> {
-        leaf.subject_public_key_info()
-            .as_ref()
-            .strip_prefix(ED25519_SPKI_PREFIX)
-            .and_then(|raw| raw.try_into().ok())
-            .map(Self)
-            .ok_or(CertificateError::BadEncoding)
     }
 }
 
 /// Decides whether a peer key is permitted at certificate verification time.
 /// TLS verifies possession of the private key separately, so keep this
 /// callback a policy check and treat the peer as authenticated after the handshake.
-pub type PeerAuthorizer = Box<dyn Fn(PeerIdentity) -> bool + Send + Sync>;
+pub type PeerAuthorizer = Box<dyn Fn(PublicKey) -> bool + Send + Sync>;
 
 /// Authenticates self-signed Ed25519 peers with an optional admission policy.
 ///
@@ -150,7 +124,7 @@ impl Verifier {
     }
 
     fn admit(&self, leaf: &EndEntityCert<'_>) -> Result<(), rustls::Error> {
-        let peer = PeerIdentity::from_leaf(leaf)?;
+        let peer = leaf_public_key(leaf)?;
         if self
             .authorize_peer
             .as_ref()
@@ -276,6 +250,15 @@ impl ServerCertVerifier for Verifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         vec![SignatureScheme::ED25519]
     }
+}
+
+fn leaf_public_key(leaf: &EndEntityCert<'_>) -> Result<PublicKey, CertificateError> {
+    leaf.subject_public_key_info()
+        .as_ref()
+        .strip_prefix(ED25519_SPKI_PREFIX)
+        .and_then(|raw| raw.try_into().ok())
+        .map(PublicKey)
+        .ok_or(CertificateError::BadEncoding)
 }
 
 fn invalid_cert(error: webpki::Error) -> rustls::Error {

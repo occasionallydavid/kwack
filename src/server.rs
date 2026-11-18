@@ -20,11 +20,10 @@ use tokio::task::JoinSet;
 use tower::{Service, ServiceExt};
 use webpki::EndEntityCert;
 
-pub use crate::PeerIdentity;
-use crate::{Error, Identity, PeerAuthorizer, Verifier, invalid_cert};
+use crate::{Error, Identity, PeerAuthorizer, PublicKey, Verifier, invalid_cert, leaf_public_key};
 
 #[cfg(feature = "axum")]
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerIdentity {
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PublicKey {
     type Rejection = http::StatusCode;
 
     async fn from_request_parts(
@@ -40,7 +39,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerIdentity {
 }
 
 #[cfg(feature = "axum")]
-impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for PeerIdentity {
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for PublicKey {
     type Rejection = Infallible;
 
     async fn from_request_parts(
@@ -181,7 +180,7 @@ where
     Ok(())
 }
 
-fn peer_identity(quic: &quinn::Connection) -> Result<Option<PeerIdentity>, Error> {
+fn peer_identity(quic: &quinn::Connection) -> Result<Option<PublicKey>, Error> {
     let Some(identity) = quic.peer_identity() else {
         return Ok(None);
     };
@@ -194,9 +193,7 @@ fn peer_identity(quic: &quinn::Connection) -> Result<Option<PeerIdentity>, Error
         );
     };
     let leaf = EndEntityCert::try_from(certificate).map_err(invalid_cert)?;
-    Ok(Some(
-        PeerIdentity::from_leaf(&leaf).map_err(rustls::Error::from)?,
-    ))
+    Ok(Some(leaf_public_key(&leaf).map_err(rustls::Error::from)?))
 }
 
 async fn respond<S, B>(
