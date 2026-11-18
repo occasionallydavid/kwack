@@ -1,8 +1,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 use bytes::Bytes;
 use http::Request;
-use http_body_util::{BodyExt, Empty, Limited};
-use quic_wg::{Client, Error, PrivateKey};
+use http_body_util::{BodyExt, Full, Limited};
+use kwack::{Client, Error, PrivateKey};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -24,8 +24,8 @@ async fn main() -> Result<(), Error> {
     );
     let request = Request::builder()
         .uri(&path)
-        .header("host", "quic_wg")
-        .body(Empty::<Bytes>::new())?;
+        .header("host", "kwack")
+        .body(Full::new(Bytes::from_static(b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")))?;
     let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let response = client.send(request).await?;
         let status = response.status();

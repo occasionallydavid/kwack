@@ -1,5 +1,5 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-use quic_wg::{Error, PrivateKey};
+use kwack::{Error, PrivateKey};
 
 fn main() -> Result<(), Error> {
     let key = PrivateKey::generate()?;

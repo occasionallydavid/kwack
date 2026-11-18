@@ -1,32 +1,33 @@
 [package]
-name = "quic_wg"
-version = "0.5.0"
+name = "kwack"
+version = "0.6.0"
 edition = "2024"
 resolver = "3"
 license = "Apache-2.0"
-keywords = ["quic"]
+keywords = ["noise", "kcp", "udp", "streams"]
 categories = ["network-programming", "asynchronous"]
 readme = "README.md"
-description = "Authenticated QUIC streams and HTTP over userspace WireGuard"
-documentation = "https://docs.rs/quic_wg"
+description = "Authenticated KCP streams and HTTP over Noise IKpsk2"
+documentation = "https://docs.rs/kwack"
 repository = "https://github.com/occasionallydavid/quic_wg"
 
 [dependencies]
+noise-protocol = { version = "0.2.1", default-features = false, features = ["use_std"] }
+noise-rust-crypto = { version = "0.6.2", default-features = false, features = ["use-x25519", "use-chacha20poly1305", "use-blake2"] }
+kcp = { version = "0.6", default-features = false }
+rand = { version = "0.10", default-features = false, features = ["thread_rng"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+blake2 = { version = "0.10", default-features = false }
+subtle = { version = "2", default-features = false }
 bytes = { version = "1", default-features = false }
-quinn-proto = { version = "0.11.8", default-features = false, features = ["ring"] }
-tracing = { version = "0.1", default-features = false }
-boringtun = { version = "0.7.1", default-features = false }
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "ring"] }
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "sync", "time"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "sync", "time", "io-util"] }
 http = { version = "1", default-features = false, optional = true }
 tower-service = { version = "0.3", default-features = false, optional = true }
 hyper = { version = "1", default-features = false, features = ["http1"], optional = true }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"], optional = true }
-base64 = { version = "0.22", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
 parking_lot = { version = "0.12", default-features = false }
-
-tokio-util = { version = "0.7", default-features = false }
-ring = { version = "0.17", default-features = false }
 
 [features]
 default = ["http"]
@@ -35,15 +36,11 @@ client = ["dep:http", "dep:hyper", "hyper/client", "dep:hyper-util"]
 server = ["dep:http", "dep:tower-service", "dep:hyper", "hyper/server", "dep:hyper-util", "hyper-util/service"]
 
 [dev-dependencies]
-blake2 = { version = "0.10", default-features = false }
 http-body-util = { version = "0.1", default-features = false }
 tokio = { version = "1", default-features = false, features = ["io-util", "signal", "test-util"] }
 axum = { version = "0.8", default-features = false }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
-rcgen = { version = "0.14", default-features = false, features = ["ring"] }
-quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [[example]]
 name = "server"

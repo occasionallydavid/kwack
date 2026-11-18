@@ -3,18 +3,24 @@
 
 #[cfg(feature = "client")]
 mod client;
+
+mod crypto;
+
 mod keys;
-mod packet;
-mod plaintext;
+
+mod rekey;
+
 #[cfg(feature = "server")]
 mod server;
-mod socket;
-mod transport;
 
+mod stream;
+
+mod transport;
 pub use keys::{PrivateKey, PublicKey};
+pub use stream::KcpStream;
 pub use transport::{
     Client, ClientBuilder, Connection, PeerIdentity, RejectedDatagram, RejectionReason, Server,
-    ServerBuilder, ServerHandle, Stream,
+    ServerBuilder, ServerHandle,
 };
 
 /// Errors are propagated through all public async operations.

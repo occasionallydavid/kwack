@@ -12,7 +12,7 @@ use tower_service::Service;
 use crate::{Connection, Error, Server};
 
 impl Server {
-    /// Serves a cloneable Tower HTTP service over authenticated QUIC streams.
+    /// Serves a cloneable Tower HTTP service over authenticated KCP conversations.
     /// Each request carries its authenticated [`crate::PeerIdentity`] in its extensions.
     pub async fn serve<S, B>(self, service: S) -> Result<(), Error>
     where
@@ -26,6 +26,7 @@ impl Server {
         self.serve_with_shutdown(service, std::future::pending::<()>())
             .await
     }
+
     /// Cancels active handlers and closes the transport when shutdown resolves.
     pub async fn serve_with_shutdown<S, B>(
         mut self,
@@ -72,7 +73,7 @@ where
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
-            stream=connection.accept_bi(), if tasks.len() < 64 =>match stream {
+            stream=connection.accept_stream(), if tasks.len() < 64 =>match stream {
                 Ok(stream)=>{
                     let service=TowerToHyperService::new(service.clone());
                     let service=hyper::service::service_fn(move |mut request: Request<Incoming>| {

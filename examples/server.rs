@@ -2,7 +2,7 @@
 use axum::body::Bytes;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use quic_wg::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
+use kwack::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Error> {
         }
     });
     let router = Router::new()
-        .route("/", get(|| async { "hello over WireGuard–QUIC\n" }))
+        .route("/", get(|| async { "hello over Noise–KCP\n" }))
         .route(
             "/whoami",
             get(|Extension(peer): Extension<PeerIdentity>| async move {

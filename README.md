@@ -1,27 +1,30 @@
-# quic_wg
+# kwack
 
-QUIC streams and HTTP authenticated and encrypted by BoringTun's userspace
-WireGuard state machine. One library owns the UDP socket, WireGuard handshakes,
-rekeys, and QUIC endpoints. No TUN device, OS routes, or root access is needed.
-
-## Why?
-
-WireGuard exposes a UDP port that stays silent unless the sender knows its public
-key, with decentralised identity and authentication based on self-administered key
-pairs. QUIC adds a modern transport suitable for streaming and bulk requests.
+Authenticated reliable byte streams and Tower/HTTP services over UDP.
+**Noise IKpsk2 is the outer protocol; KCP is the inner protocol.**
 
 ```text
-Axum / HTTP client ↔ HTTP/1.1 ↔ QUIC streams ↔ WireGuard ↔ UDP
+Tower / Axum / Hyper HTTP/1.1 ↔ KCP conversations ↔ Noise IKpsk2 ↔ UDP
 ```
 
-See the [crate documentation](https://docs.rs/quic_wg) for the API guide,
-features, transport details, and compatibility notes.
+Each endpoint has an X25519 key pair. Clients pin server public keys; servers
+explicitly authorize client public keys. A public-key opening MAC keeps the
+listener silent to senders who do not know its public key. Multiple independent
+KCP conversations share an authenticated Noise session. Each conversation is a
+Tokio `AsyncRead`/`AsyncWrite` stream with reliable retransmission and half-close.
+No fake IP framing, TUN device, OS routes, root access, QUIC, or TLS.
+
+The generic Tower service adapter accepts Axum routers and inserts authenticated
+`PeerIdentity` into every HTTP request. Hyper carries streaming HTTP/1.1 request
+and response bodies over separate KCP conversations. Key encoding remains
+compatible with WireGuard's base64 key format; the network protocol is kwack's.
+
+See [the API guide](src/lib.md) for builders, stream APIs, wire format, resource
+limits, automatic fresh-DH rekeying every two minutes, and current limitations.
 
 ## Run the examples
 
-The examples take base64 private keys directly as command-line arguments.
-Generate key pairs into shell variables (Bash); `keygen` prints the private and
-public key on one line, separated by a space:
+Generate two key pairs in Bash. The examples accept private keys directly:
 
 ```sh
 read -r SERVER_PRIVATE SERVER_PUBLIC < <(cargo run --quiet --example keygen)
@@ -29,27 +32,25 @@ read -r CLIENT_PRIVATE CLIENT_PUBLIC < <(cargo run --quiet --example keygen)
 printf 'Server public key: %s\nClient public key: %s\n' "$SERVER_PUBLIC" "$CLIENT_PUBLIC"
 ```
 
-Start the Axum server in one terminal:
+Start the Axum server:
 
 ```sh
 cargo run --example server -- "$SERVER_PRIVATE" "$CLIENT_PUBLIC"
 ```
 
-In another terminal, set the client private key and server public key variables
-to their generated values, then run:
+In another terminal, set the client private key and server public key to the
+values above, then run:
 
 ```sh
 cargo run --example client -- "$CLIENT_PRIVATE" 127.0.0.1:4433 "$SERVER_PUBLIC" /whoami
 ```
 
-`/whoami` returns the authenticated **client public key**. `/` returns a greeting,
-and `POST /echo` echoes the request body. Set `BIND_ADDR` to change the listener;
-pass additional authorized public keys as additional server arguments. Ctrl-C
-shuts down the example server.
+`/whoami` returns the authenticated client public key, `/` returns a greeting,
+and `POST /echo` echoes the request body. `BIND_ADDR` changes the listener.
+Additional server arguments authorize additional client public keys.
+Ctrl-C shuts down the server.
 
 ## Development
-
-Formatting uses nightly rustfmt for module-level import grouping.
 
 ```sh
 cargo +nightly fmt --check
@@ -59,10 +60,9 @@ cargo test --doc
 cargo clippy --all-targets -- -D warnings
 ```
 
-Tests exercise authorization, server-key pinning, per-peer identity, revocation,
-HTTP, replay rejection, packet loss, endpoint roaming, ciphertext
-on the wire, and ordinary TLS QUIC sharing the same UDP port. `unwrap()` and `expect()` are denied outside tests.
+Tests cover public-key authentication and pinning, PSKs, independent conversations,
+HTTP/Tower readiness and identity, revocation, replay rejection, retransmission,
+packet loss/reordering, endpoint roaming, and stream shutdown/draining.
 
-## Source provenance
-
-Based on [quinn-plaintext](https://github.com/jeromegn/quinn-plaintext).
+Uses [noise-protocol / noise-rust-crypto](https://github.com/sopium/noise-rust)
+and [kcp](https://github.com/Matrix-Zhang/kcp) from crates.io. No crypto fork.

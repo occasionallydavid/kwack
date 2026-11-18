@@ -1,193 +1,226 @@
-QUIC streams and HTTP authenticated and encrypted by BoringTun's userspace
-WireGuard state machine. One library owns the UDP socket, WireGuard handshakes,
-rekeys, and QUIC endpoints. No TUN device, OS routes, or root access is needed.
+Reliable streams and Tower/HTTP services over **outer Noise IKpsk2 encryption**
+and **inner KCP conversations**. One Tokio UDP socket carries multiple independent
+conversations per authenticated session. No IP packets, TUN devices, or OS routes.
 
 ```text
-Axum / HTTP client ↔ HTTP/1.1 ↔ QUIC streams ↔ WireGuard ↔ UDP
+Tower / Axum / Hyper HTTP/1.1
+             ↕
+KcpStream: reliable OPEN / DATA / FIN records
+             ↕
+Independent KCP conversations (one per stream)
+             ↕
+Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s
+             ↕
+            UDP
 ```
 
-The server has its own private key and an authorization callback for client
-public keys. The client supplies its private key and pins the server public key.
-WireGuard provides authentication, encryption, and replay protection. The inner
-QUIC implementation provides reliability, congestion control, and independent
-streams. Inner QUIC packets carry no additional checksum or authentication tag.
-Plaintext QUIC configuration is private to the crate.
+## Authentication and admission
 
-## Server API
+Each endpoint owns an X25519 private key. Clients pin the server public key;
+servers authorize client public keys with an in-memory callback. Base64 key
+encoding is compatible with WireGuard's key format. The wire protocol is kwack's,
+and does not interoperate with a WireGuard VPN or a raw KCP endpoint.
 
-`serve(service)` accepts a cloneable Tower `Service<Request<hyper::body::Incoming>>`
-returning an HTTP response with any sendable body. Axum routers work directly;
-plain handlers can use `tower::service_fn`. Axum is only a development dependency
-for this crate's examples and tests.
+An opening MAC derived from the server public key silently rejects senders who
+do not know that key, before performing the Noise handshake. Knowing that public
+key does not grant authorization. The Noise handshake proves the client static
+identity; the first encrypted KCP packet proves possession of the final session
+keys before the server exposes a connection. The client can send data immediately
+after the two Noise handshake messages, without a separate confirmation exchange. A mismatched PSK never establishes a session.
+
+`preshared_key([u8; 32])` configures an optional additional secret on either builder.
+The server uses that same PSK for all its peers. Both ends default to 32 zero bytes,
+as in WireGuard when no additional PSK is configured. The Noise pattern is always
+IKpsk2. Key generation uses an OS-backed RNG. Private key Debug output is redacted;
+explicit key exports use ordinary byte arrays and strings.
+
+## Tower / Axum server
 
 ```rust,no_run
 # #[cfg(feature = "server")]
-# mod example {
+# async fn example(private: kwack::PrivateKey, client_public: kwack::PublicKey) -> Result<(), kwack::Error> {
 use axum::{Extension, Router, routing::get};
-use quic_wg::{Error, PeerIdentity, PrivateKey, PublicKey, Server};
+use kwack::{PeerIdentity, Server};
 
-# async fn example(server_private: PrivateKey, client_public: PublicKey) -> Result<(), Error> {
-let router = Router::new().route("/whoami", get(|Extension(peer): Extension<PeerIdentity>| async move {
-    peer.public_key().to_string()
-}));
-let server = Server::builder(server_private)
+let router = Router::new().route("/whoami", get(
+    |Extension(peer): Extension<PeerIdentity>| async move {
+        peer.public_key().to_string()
+    },
+));
+let server = Server::builder(private)
     .authorize(Box::new(move |key| key == client_public))
     .bind("0.0.0.0:4433")
     .await?;
-let handle = server.handle();
-// handle.revoke_peer(client_public).await?;
 server.serve(router).await?;
 # Ok(())
 # }
-# }
 ```
 
-`PeerIdentity` is inserted into request extensions from the authenticated transport
-on every HTTP request. Read it through `request.extensions()` or Axum's
-`Extension<PeerIdentity>` extractor.
-It is never taken from a header or the network address. Each authorized public key
-has its own virtual QUIC endpoint, so one peer cannot inject QUIC packets into
-another peer's connections. Revocation removes the WireGuard state and closes
-that peer's existing QUIC connections and denies it for the server's lifetime.
+`serve` accepts a cloneable Tower service of `Request<hyper::body::Incoming>`.
+Tower readiness is honored. Authenticated `PeerIdentity` is inserted into every
+request's extensions, never read from an HTTP header or inferred from the IP address.
+Each HTTP exchange opens an independent KCP conversation. Request and response
+bodies stream through Hyper. `serve_with_shutdown` accepts a shutdown future.
 
-`authorize(Box::new(|key| ...))` is the only admission interface. The callback runs
-on every WireGuard handshake initiation, including rekeys, and may consult shared
-mutable state to change admission without rebinding. It runs synchronously on
-the UDP dispatcher: use an in-memory lookup, not blocking database or network I/O.
-The callback sees a claimed key before full handshake authentication; peer state
-is installed only after the handshake authenticates. Returning false affects
-subsequent handshakes; call `revoke_peer` to terminate an existing session.
-Without a callback the server denies all peers. New peers are created lazily,
-with at most 1,024 cached peers per server. A peer with no live QUIC connections
-is evicted after 60 seconds and may be admitted again through the callback.
-WireGuard keepalives do not extend this idle period.
+Admission defaults to deny. The authorization callback runs synchronously on
+handshake initiation after the first Noise message authenticates the client's
+static key, but before final PSK confirmation. It must not perform blocking I/O.
+Changes to the callback's policy affect subsequent handshakes.
+`server.handle().revoke_peer(key).await?` closes all current sessions of that key
+and denies it for the listener's lifetime.
 
-Use `serve_with_shutdown(router, shutdown_future)` for coordinated shutdown,
-or `accept()` / `Connection::accept_bi()` for a custom application protocol.
-Streams implement Tokio's `AsyncRead` and `AsyncWrite`. Handshakes are accepted
-concurrently with a bound on outstanding accept tasks.
-
-## Client API
+## HTTP client
 
 ```rust,no_run
 # #[cfg(feature = "client")]
-# mod example {
+# async fn example(private: kwack::PrivateKey, server_public: kwack::PublicKey) -> Result<(), kwack::Error> {
 use bytes::Bytes;
 use http::Request;
 use http_body_util::{BodyExt, Empty};
-use quic_wg::{Client, Error, PrivateKey, PublicKey};
-# async fn example(private: PrivateKey, server_key: PublicKey) -> Result<(), Error> {
+use kwack::Client;
+
 let client = Client::builder(private)
-    .remote("127.0.0.1:4433".parse()?, server_key)
+    .remote("127.0.0.1:4433".parse()?, server_public)
     .connect().await?;
-let request = Request::builder()
+let response = client.send(Request::builder()
     .uri("/whoami")
     .header("host", "my-service")
-    .body(Empty::<Bytes>::new())?;
-let response = client.send(request).await?;
+    .body(Empty::<Bytes>::new())?
+).await?;
 let body = response.into_body().collect().await?.to_bytes();
 println!("{}", String::from_utf8(body.to_vec())?);
 client.close().await;
 # Ok(())
 # }
+```
+
+URIs must use origin-relative paths and stay on the pinned peer. Set `Host` and
+other routing metadata with the normal request builder. This is HTTP/1.1 over
+KCP streams. Callers choose request deadlines and body collection limits.
+
+## Independent conversations and byte streams
+
+`Server::accept()` returns a Noise `Connection` after the first authenticated
+transport packet arrives. Open/write a client stream to trigger it; an idle
+client's ordinary keepalive also triggers admission. Either endpoint can open a
+conversation with `Connection::open_stream()`; the other endpoint receives it
+through `Connection::accept_stream()`. Each `KcpStream` implements Tokio's
+`AsyncRead` and `AsyncWrite`, so it can be passed to Hyper through `TokioIo` or to
+ordinary Tokio read/write utilities. `conversation_id()` identifies its KCP state
+within the Noise session. Client-opened IDs are odd and server-opened IDs are even.
+
+```rust,no_run
+# async fn example(connection: kwack::Connection) -> Result<(), kwack::Error> {
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+let mut first = connection.open_stream().await?;
+let mut second = connection.open_stream().await?;
+assert_ne!(first.conversation_id(), second.conversation_id());
+first.write_all(b"request").await?;
+first.shutdown().await?; // queue a reliable FIN; the read half remains usable
+second.write_all(b"independent request").await?;
+second.shutdown().await?;
+let mut reply = Vec::new();
+first.read_to_end(&mut reply).await?;
+# Ok(())
 # }
 ```
 
-`Client::send()` accepts `http::Request<B>` with a streaming body and returns
-`http::Response<hyper::body::Incoming>`. Set headers and HTTP routing metadata
-such as `Host` using the standard request builder. Requests use origin-relative
-paths and stay on the pinned peer. Each request opens a QUIC stream on the
-existing connection and sets `Connection: close` for that stream.
+KCP message mode carries bounded OPEN/DATA/FIN records; `KcpStream` concatenates
+DATA into a byte stream. OPEN includes the first write's data when available, and
+vectored writes combine HTTP headers and bodies into that record. A conversation
+opened for reading alone sends an empty OPEN after a short scheduling grace period.
+There is no OPEN acknowledgment barrier before sending application data. KCP acknowledges and retransmits all three record types.
+`flush()` waits for KCP acknowledgment of queued records; `shutdown()` queues a reliable FIN after pending DATA; it returns without
+waiting for the peer to acknowledge it. A dropped stream queues FIN and permits a bounded drain.
+`Connection::close()` aborts local I/O immediately and sends closure in the
+background. `Connection::shutdown().await` and `Client::close().await` also wait
+for an encrypted close acknowledgment, retrying for up to one second. Neither
+flushes queued application writes. Await the async close before stopping the
+runtime. Streams keep their UDP driver alive after the Client or
+Connection handle is dropped. The final driver drains for up to five seconds;
+stopping the Tokio runtime interrupts that drain.
 
-Callers control timeouts and body collection, including buffering limits;
-`http-body-util` supplies standard body utilities. The client example bounds
-both request time and response size. HTTP/1.1 runs directly over QUIC streams;
-this is not standard TLS HTTP/3.
+## Wire format and bounds
 
-Keys parse from WireGuard's standard base64 format. `PrivateKey::generate()` uses
-an OS-backed cryptographic RNG. Private-key debug output is redacted. Keys use ordinary byte arrays and base64
-exports return ordinary strings.
+Openings contain a protocol/version marker, a random 128-bit session ID, the
+Noise initiation with an encrypted timestamp, and a 16-byte public-key gate MAC.
+The session ID and protocol domain are bound into the Noise prologue. Identical
+handshake retries reuse the cached response without resetting transport counters.
+Openings expire after 30 seconds of clock skew; accepted initiation IDs are kept
+in a bounded replay cache for 65 seconds.
 
-## Rejected packets and shared-port QUIC
+Transport datagrams contain the marker, packet type, session ID, an explicit
+64-bit counter, and a Noise ciphertext/tag. The counter's high 32 bits identify
+the key generation; its low 32 bits count packets independently in each direction. The full 29-byte transport header is
+AEAD associated data. A 2,048-packet replay window admits reordering and rejects
+duplicates; it advances only after successful authentication. KCP retransmissions
+are encrypted with fresh Noise nonces. Only authenticated packets can update the
+peer's UDP address, permitting roaming.
 
-`server.take_rejected()` returns a bounded receiver of `RejectedDatagram` values:
+Outer UDP payloads are capped at 1,200 bytes, including the 29-byte header and
+16-byte authentication tag. There is no synthetic IP/UDP framing. The KCP MTU is
+1,154 bytes, leaving one encrypted byte for the packet subtype. Each conversation
+has 128-segment send/receive windows and a bounded application receive queue of
+approximately 256 KiB. Application writes are chunked at 16 KiB; the send queue
+applies backpressure at 128 segments. Congestion control remains enabled.
 
-- `data`: untouched outer UDP bytes, including rejected WireGuard ciphertext.
-- `source`: original sender address.
-- `local_address`: bound socket address; wildcard binds do not expose the exact destination IP.
-- `reason`: unrecognized traffic, malformed WireGuard, unauthorized peer, unknown
-  session, authentication failure, invalid inner packet, or peer capacity reached.
+A session permits 128 active/draining conversations. Opening another at capacity
+returns `WouldBlock`. Closed conversation IDs are not reused; retired IDs use a
+bounded replay window. Dropped conversations linger briefly to ACK retransmitted
+FINs and are removed within five seconds. The listener permits 1,024 sessions,
+128 queued connections, and 256 queued raw packet rejections. Unconfirmed sessions
+expire after 60 seconds. Confirmed peers exchange keepalives every ten seconds
+and time out after 60 seconds without authenticated traffic.
 
-The feed never exposes decrypted application data. It is suitable for inspection
-or mirroring to a separate service. Queue capacity is 256 datagrams; overload
-causes drops rather than blocking authenticated traffic.
+`take_rejected()` returns untouched UDP bytes with source, bound local address,
+and a rejection reason. Its bounded queue drops on overload. It never exposes
+decrypted data. A wildcard bind does not reveal the exact local destination IP.
 
-For a normal QUIC service sharing the **same UDP port**, take the fallback socket:
+Session closure stops KCP and keepalives immediately. Close and acknowledgment
+packets are authenticated; the initiator retries for one second, and the receiver
+lingers for two seconds solely to acknowledge close retransmissions. An unreachable
+peer can still require the idle timeout to detect a crash or lost close exchange.
+The public-key gate is not a substitute
+for WireGuard's cookie challenge/rate limiter, which this protocol does not yet
+implement. Path MTU discovery and UDP segmentation offload are not implemented.
 
-```rust,ignore
-let fallback = server.take_fallback_socket()?;
-let ordinary_quic = quinn::Endpoint::new_with_abstract_socket(
-    quinn::EndpointConfig::default(),
-    Some(your_normal_tls_server_config),
-    fallback,
-    std::sync::Arc::new(quinn::TokioRuntime),
-)?;
-```
+## Rekeying
 
-The dispatcher automatically routes non-WireGuard datagrams to that virtual
-socket. Responses leave through the original bound UDP socket, preserving its
-port. Recognizable WireGuard packets that fail authentication remain on the
-rejection feed and are not automatically passed to the fallback. Only one
-fallback socket and one rejection receiver can be taken. Keep the server or its
-handle alive while the fallback is in use. Separate `recv_from` loops on the
-physical socket are not needed.
+The client initiates a fresh `Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s` handshake every
+120 seconds, including on idle sessions. This performs fresh ephemeral DH; it is
+not just symmetric-key derivation. Rekey initiation and response messages travel
+inside the existing encrypted session. The logical session ID, authenticated
+identity, KCP conversation IDs, queues, windows, and retransmissions remain intact.
 
-## Transport details and compatibility
+Each rekey binds the logical session ID and strictly increasing generation into
+the Noise prologue, checks that the static peer identity has not changed, and
+checks the server's current authorization policy before replying. Retransmitted
+handshake messages reuse the cached Noise bytes but receive fresh outer packet
+nonces. The client retries a lost initiation/response every 200 ms.
 
-The crate uses minimal IPv4/UDP envelopes inside WireGuard because BoringTun's
-public API validates inner IP packets. These addresses are internal to each peer
-namespace and never enter the OS routing table. Authenticated packets may update
-a peer's outer address, allowing UDP endpoint roaming. BoringTun timers run every
-250 ms and handle handshake retries, keepalives, and rekeys.
+After validating the Noise response, the client immediately sends application
+data under the candidate keys. The responder switches after authenticating its
+first new-key KCP packet or normal keepalive. The initiator settles the exchange
+when it receives normal traffic under the new keys. There is no explicit key
+confirmation or acknowledgment frame, and no added data RTT. Idle sessions use
+their existing ten-second keepalives to confirm the switch.
 
-Inner QUIC datagrams are capped at 1200 bytes. With the internal IPv4/UDP header
-and WireGuard transport overhead, the outer UDP payload is 1260 bytes. The path
-must accommodate this plus its outer IP/UDP headers; outer IP fragmentation and
-path MTU adaptation are not implemented. UDP segmentation offload is disabled. Unidirectional QUIC streams and QUIC
-datagrams are disabled. Each connection has an 8 MiB aggregate receive window,
-a 1 MiB per-stream receive window, and an 8 MiB send window. Each peer endpoint
-allows 64 pending connections, with at most 256 KiB buffered per pending
-connection and 2 MiB total pending-connection buffering.
-
-Dropped streams keep the transport alive for up to five seconds while queued
-data is acknowledged. Final transport teardown also allows up to five seconds
-for QUIC connection-close packets to drain. Both drains run in the background
-while the Tokio runtime is running. `client.close().await` initiates closure and
-returns immediately, without waiting for the QUIC close timer or pending stream
-acknowledgements. Runtime shutdown may interrupt background draining.
-
-This package replaces the former `quinn-plaintext` public API and does not
-interoperate directly with stock TLS QUIC clients. Ordinary QUIC uses the
-optional shared-port fallback. A general-purpose WireGuard VPN peer alone does
-not provide the inner QUIC/HTTP application endpoint.
+Previous receive keys overlap until they reach 180 seconds of age. Every generation
+has its own replay window; reordering and duplicates cannot reset counters or roll
+back the active generation. Old keys are discarded at their age limit. If rekeying
+cannot succeed before the current keys reach 180 seconds, the session closes and
+streams fail rather than continuing indefinitely with expired keys. Packet counters
+and generation numbers cannot wrap. Session resumption is not implemented.
 
 ## Features
 
-The default `http` feature enables all HTTP conveniences. Select only what your
-application uses with `default-features = false`:
-
-| Feature | Provides |
-| --- | --- |
-| `server` | Generic Tower HTTP service support over Hyper. |
-| `client` | Native streaming HTTP client over Hyper. |
-| `http` | Both features above. |
-
-The library uses the caller's Tokio runtime. Examples and tests use the
-current-thread runtime. Signal handling is enabled only for development targets.
-
-Disable defaults to use only authenticated streams:
+The default `http` feature enables `server` and `client`. Disable default features
+for authenticated KCP streams without Hyper or Tower:
 
 ```toml
-quic_wg = { version = "0.5", default-features = false }
+kwack = { version = "0.6", default-features = false }
 ```
 
+The transport uses `noise-protocol` with `noise-rust-crypto` configured for only
+X25519, ChaCha20-Poly1305, and BLAKE2, and `kcp` for reliability. All dependencies
+come from crates.io; there is no vendored or locally patched crypto implementation.

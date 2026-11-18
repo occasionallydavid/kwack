@@ -10,12 +10,12 @@ use bytes::Bytes;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
-use quic_wg::{Client, Error, PeerIdentity, PrivateKey, Server};
+use kwack::{Client, Error, PeerIdentity, PrivateKey, Server};
 use tokio::task::JoinSet;
 use tower_service::Service;
 
 #[tokio::test(flavor = "current_thread")]
-async fn closing_after_one_request_does_not_wait_for_quic_draining() {
+async fn closing_after_one_request_does_not_wait_for_kcp_draining() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let server_key = PrivateKey::from_bytes([92; 32]);
         let server_public = server_key.public_key();
@@ -42,17 +42,10 @@ async fn closing_after_one_request_does_not_wait_for_quic_draining() {
             response.into_body().collect().await.unwrap().to_bytes(),
             "ok"
         );
-
-        // Poll once: closing must finish without waiting for packets or timers.
-        let mut close = std::pin::pin!(client.close());
-        std::future::poll_fn(|cx| {
-            assert!(
-                close.as_mut().poll(cx).is_ready(),
-                "client close waited for QUIC draining"
-            );
-            Poll::Ready(())
-        })
-        .await;
+        // Closing waits for its UDP exchange, not the five-second KCP drain timer.
+        tokio::time::timeout(Duration::from_millis(500), client.close())
+            .await
+            .unwrap();
         client.connection().closed().await;
     })
     .await
@@ -218,7 +211,9 @@ struct EchoService {
 
 impl Service<Request<Incoming>> for EchoService {
     type Response = Response<Full<Bytes>>;
+
     type Error = Error;
+
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -325,11 +320,13 @@ async fn handler_panics_are_logged_without_stopping_other_streams() {
     use std::sync::{Arc, Mutex};
 
     struct Log(Arc<Mutex<Vec<u8>>>);
+
     impl Write for Log {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(bytes);
             Ok(bytes.len())
         }
+
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
@@ -391,4 +388,59 @@ async fn handler_panics_are_logged_without_stopping_other_streams() {
     })
     .await
     .expect("handler panic test timed out");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn first_request_body_follows_noise_response_without_extra_roundtrips() {
+    use tokio::net::UdpSocket;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let private = PrivateKey::from_bytes([220; 32]);
+        let public = private.public_key();
+        let server = Server::builder(private).authorize(Box::new(|_| true))
+            .bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr();
+        let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay = front.local_addr().unwrap();
+        let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (first_packet, first_seen) = tokio::sync::oneshot::channel();
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            let mut a = [0; 1500];
+            let mut b = [0; 1500];
+            let mut client = None;
+            let mut server_packets = 0;
+            let mut first_packet = Some(first_packet);
+            loop {
+                tokio::select! {
+                    received = front.recv_from(&mut a) => {
+                        let (len, source) = received.unwrap();
+                        client = Some(source);
+                        if a[4] == 3 && let Some(first_packet) = first_packet.take() {
+                            let _ = first_packet.send((len, server_packets));
+                        }
+                        back.send_to(&a[..len], address).await.unwrap();
+                    }
+                    received = back.recv_from(&mut b) => {
+                        let (len, _) = received.unwrap();
+                        server_packets += 1;
+                        if let Some(client) = client { front.send_to(&b[..len], client).await.unwrap(); }
+                    }
+                }
+            }
+        });
+        tasks.spawn(async move {
+            server.serve(Router::new().route("/echo", post(|body: Bytes| async move { body }))).await.unwrap();
+        });
+        let client = Client::builder(PrivateKey::from_bytes([221; 32])).remote(relay, public).connect().await.unwrap();
+        let body = Bytes::from(vec![0x78; 319]);
+        let request = Request::builder().method("POST").uri("/echo").header("host", "kwack")
+            .body(Full::new(body.clone())).unwrap();
+        let response = client.send(request).await.unwrap();
+        assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), body);
+        let (length, responses_before_data) = first_seen.await.unwrap();
+        assert_eq!(responses_before_data, 1, "only the Noise response may precede the request");
+        assert!(length >= 319 + 70, "the first KCP packet must include the body, not just OPEN or HTTP headers");
+        client.close().await;
+    }).await.expect("one-RTT startup test timed out");
 }
