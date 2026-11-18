@@ -13,7 +13,7 @@ use tokio::time::Instant;
 
 use crate::crypto::{self, DatagramCrypto, ReplayWindow, SessionId};
 use crate::rekey::{self, SessionKeys};
-use crate::stream::{Conversation, MAX_CONVERSATIONS};
+use crate::stream::{Conversation, MAX_CONVERSATIONS, SMALL_WRITE_DELAY, is_ack_or_fin};
 use crate::{Error, KcpStream, PrivateKey, PublicKey};
 
 const MAX_SESSIONS: usize = 1024;
@@ -135,6 +135,8 @@ struct Session {
     last_ping: Instant,
     remote_convs: ReplayWindow,
     closing: Option<Closing>,
+    deferred_control: Vec<Vec<u8>>,
+    control_deadline: Option<Instant>,
 }
 
 impl Session {
@@ -159,6 +161,8 @@ impl Session {
             last_ping: now,
             remote_convs: ReplayWindow::default(),
             closing: None,
+            deferred_control: Vec::new(),
+            control_deadline: None,
         }
     }
 
@@ -301,13 +305,41 @@ impl Session {
                 true
             });
         }
-        for packet in packets {
-            let mut payload = Vec::with_capacity(packet.len() + 1);
-            payload.push(crypto::SEGMENT);
-            payload.extend_from_slice(&packet);
-            self.send(socket, &payload);
+        if self
+            .control_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.flush_control(socket);
         }
-        next_write
+        for packet in packets {
+            if self.state.initiator && is_ack_or_fin(&packet) {
+                // Let a client completing its response send DONE in place of
+                // these packets. For a reusable session, send after a short delay.
+                if self.deferred_control.len() == QUEUE {
+                    self.flush_control(socket);
+                }
+                self.deferred_control.push(packet);
+                self.control_deadline.get_or_insert(now + SMALL_WRITE_DELAY);
+            } else {
+                self.flush_control(socket);
+                self.send_segment(socket, &packet);
+            }
+        }
+        next_write.into_iter().chain(self.control_deadline).min()
+    }
+
+    fn flush_control(&mut self, socket: &UdpSocket) {
+        self.control_deadline = None;
+        for packet in std::mem::take(&mut self.deferred_control) {
+            self.send_segment(socket, &packet);
+        }
+    }
+
+    fn send_segment(&mut self, socket: &UdpSocket, packet: &[u8]) {
+        let mut payload = Vec::with_capacity(packet.len() + 1);
+        payload.push(crypto::SEGMENT);
+        payload.extend_from_slice(packet);
+        self.send(socket, &payload);
     }
 }
 
@@ -315,6 +347,7 @@ enum Command {
     #[cfg(test)]
     AgeKeys(Duration, oneshot::Sender<()>),
     Close(SessionId, oneshot::Sender<()>),
+    Done(SessionId, oneshot::Sender<()>),
     Revoke(PublicKey, oneshot::Sender<()>),
     Shutdown(oneshot::Sender<()>),
 }
@@ -532,11 +565,21 @@ impl Client {
         self.connection.network.local
     }
 
-    /// Stops application I/O and waits for the encrypted close acknowledgment.
-    /// Retries for up to one second if the peer or its reply is lost.
-    /// Does not flush pending application writes.
+    /// Ends the session with a single best-effort authenticated datagram.
+    /// Waits only for the local send attempt. The peer expires the session if
+    /// the datagram is lost. Collect the response and flush any writes first.
     pub async fn close(&self) {
-        self.connection.shutdown().await;
+        let (tx, rx) = oneshot::channel();
+        if self
+            .connection
+            .network
+            .command
+            .send(Command::Done(self.connection.state.id, tx))
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
     }
 }
 
@@ -782,29 +825,35 @@ impl Driver {
         self.sessions.insert(id, session);
     }
 
-    fn packet(&mut self, packet: &[u8], source: SocketAddr, elapsed: u32) {
+    fn packet(&mut self, packet: &[u8], source: SocketAddr, elapsed: u32) -> Option<Instant> {
         if packet.len() < crypto::HEADER || &packet[..4] != crypto::MAGIC {
             self.reject(packet, source, RejectionReason::UnknownProtocol);
-            return;
+            return None;
         }
         if packet.len() > crypto::MTU {
             self.reject(packet, source, RejectionReason::MalformedPacket);
-            return;
+            return None;
         }
         let Ok(id) = packet[5..crypto::HEADER].try_into() else {
-            return;
+            return None;
         };
         match packet[4] {
             crypto::INIT => self.initiation(packet, source, id),
             crypto::TRANSPORT => {
                 let Some(session) = self.sessions.get_mut(&id) else {
                     self.reject(packet, source, RejectionReason::UnknownSession);
-                    return;
+                    return None;
                 };
                 let Ok(payload) = session.crypto.decrypt(packet) else {
                     self.reject(packet, source, RejectionReason::AuthenticationFailed);
-                    return;
+                    return None;
                 };
+                if payload == [crypto::DONE] {
+                    if let Some(session) = self.sessions.remove(&id) {
+                        session.state.close();
+                    }
+                    return None;
+                }
                 // Only authenticated packets may update the roaming UDP endpoint.
                 session.remote = source;
                 session.last_received = Instant::now();
@@ -813,14 +862,14 @@ impl Driver {
                     && payload != [crypto::CLOSE]
                     && payload != [crypto::CLOSE_ACK]
                 {
-                    return;
+                    return None;
                 }
                 if !session.confirmed {
                     // The first authenticated KCP/keepalive packet provides key
                     // confirmation, including PSK possession, without extra frames.
                     if self.incoming.try_send(session.state.clone()).is_err() {
                         session.begin_close(&self.socket, None);
-                        return;
+                        return None;
                     }
                     session.confirmed = true;
                 }
@@ -853,7 +902,7 @@ impl Driver {
                                 && !(config.authorize)(session.state.identity.key)
                             {
                                 session.begin_close(&self.socket, None);
-                                return;
+                                return None;
                             }
                             match result {
                                 Ok(Some(packet)) => {
@@ -878,7 +927,7 @@ impl Driver {
                         if let Err(error) = session.segment(segment, elapsed) {
                             tracing::debug!(%error, "invalid authenticated KCP segment");
                         }
-                        session.update(&self.socket, elapsed, false);
+                        return session.update(&self.socket, elapsed, false);
                     }
                     _ => {}
                 }
@@ -886,9 +935,11 @@ impl Driver {
             crypto::RESPONSE => {} // a delayed duplicate handshake response
             _ => self.reject(packet, source, RejectionReason::MalformedPacket),
         }
+        None
     }
 
-    fn tick(&mut self, elapsed: u32) {
+    fn tick(&mut self, elapsed: u32) -> Option<Instant> {
+        let mut next_write = None;
         self.seen
             .retain(|_, time| time.elapsed() < Duration::from_secs(65));
         self.sessions.retain(|_, session| {
@@ -897,7 +948,11 @@ impl Driver {
             } else {
                 session.created.elapsed() >= HANDSHAKE_TIMEOUT
             };
-            if expired || session.crypto.expired() || session.state.is_closed() {
+            if expired && session.closing.is_none() {
+                session.state.close();
+                return false;
+            }
+            if session.crypto.expired() || session.state.is_closed() {
                 if session.closing.is_none() {
                     session.begin_close(&self.socket, None);
                 }
@@ -945,7 +1000,8 @@ impl Driver {
                         return true;
                     }
                 }
-                session.update(&self.socket, elapsed, true);
+                let deadline = session.update(&self.socket, elapsed, true);
+                next_write = next_write.into_iter().chain(deadline).min();
                 if session.last_ping.elapsed() >= Duration::from_secs(10) {
                     session.send(&self.socket, &[crypto::PING]);
                     session.last_ping = Instant::now();
@@ -953,6 +1009,7 @@ impl Driver {
             }
             true
         });
+        next_write
     }
 
     async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
@@ -973,6 +1030,17 @@ impl Driver {
                         for session in self.sessions.values_mut() { session.crypto.age_for_test(age); }
                         let _ = ack.send(());
                     }
+                    Some(Command::Done(id, sent)) => {
+                        if let Some(mut session) = self.sessions.remove(&id) {
+                            session.state.close();
+                            if let Ok(packet) = session.crypto.encrypt_data(id, &[crypto::DONE]) {
+                                let _ = tokio::time::timeout(
+                                    RETRY, self.socket.send_to(&packet, session.remote),
+                                ).await;
+                            }
+                        }
+                        let _ = sent.send(());
+                    }
                     Some(Command::Close(id, ack)) => {
                         if let Some(session) = self.sessions.get_mut(&id) {
                             session.begin_close(&self.socket, Some(ack));
@@ -989,7 +1057,10 @@ impl Driver {
                     None => drain = Some(Instant::now()),
                 },
                 received = self.socket.recv_from(&mut buf) => match received {
-                    Ok((len, source)) => self.packet(&buf[..len], source, start.elapsed().as_millis() as u32),
+                    Ok((len, source)) => {
+                        let deadline = self.packet(&buf[..len], source, start.elapsed().as_millis() as u32);
+                        next_write = next_write.into_iter().chain(deadline).min();
+                    },
                     Err(error) => { tracing::debug!(%error, "UDP receiver stopped"); break; }
                 },
                 _ = async {
@@ -1009,7 +1080,7 @@ impl Driver {
                         .min();
                 },
                 _ = tick.tick() => {
-                    self.tick(start.elapsed().as_millis() as u32);
+                    next_write = self.tick(start.elapsed().as_millis() as u32);
                     if drain.is_some_and(|time| time.elapsed() >= DRAIN_TIMEOUT) { break; }
                 },
             }

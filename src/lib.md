@@ -134,13 +134,17 @@ Small writes share a record for up to 2.5 ms from the first write. Reaching 256 
 explicitly flushing, or shutting down submits the batch immediately.
 `flush()` waits for KCP acknowledgment of queued records; `shutdown()` queues a reliable FIN after pending DATA; it returns without
 waiting for the peer to acknowledge it. A dropped stream queues FIN and permits a bounded drain.
-`Connection::close()` aborts local I/O immediately and sends closure in the
-background. `Connection::shutdown().await` and `Client::close().await` also wait
-for an encrypted close acknowledgment, retrying for up to one second. Neither
-flushes queued application writes. Await the async close before stopping the
-runtime. Streams keep their UDP driver alive after the Client or
-Connection handle is dropped. The final driver drains for up to five seconds;
-stopping the Tokio runtime interrupts that drain.
+`Client::close().await` ends the session with one authenticated DONE datagram
+and waits only for the local send attempt. Collect the response and flush any
+pending writes before calling it. The server retires the entire session as soon
+as DONE arrives. If it is lost, the server expires the session after inactivity.
+The client briefly defers ACK-only and FIN-only KCP traffic so DONE can replace
+queued acknowledgments and stream FINs when the response has just completed.
+
+`Connection::shutdown().await` requests confirmed close and retries for up to
+one second. `Connection::close()` starts that exchange in the background.
+Streams keep the UDP driver alive, and dropping the final handle permits a
+bounded drain while the Tokio runtime is running.
 
 ## Wire format and bounds
 
@@ -179,10 +183,9 @@ and time out after 60 seconds without authenticated traffic.
 and a rejection reason. Its bounded queue drops on overload. It never exposes
 decrypted data. A wildcard bind does not reveal the exact local destination IP.
 
-Session closure stops KCP and keepalives immediately. Close and acknowledgment
-packets are authenticated; the initiator retries for one second, and the receiver
-lingers for two seconds solely to acknowledge close retransmissions. An unreachable
-peer can still require the idle timeout to detect a crash or lost close exchange.
+Session closure stops KCP and keepalives immediately. The optional confirmed
+close exchange retries for one second, and the receiver lingers for two seconds
+to acknowledge retransmissions. The default client close uses one-way DONE.
 The public-key gate is not a substitute
 for WireGuard's cookie challenge/rate limiter, which this protocol does not yet
 implement. Path MTU discovery and UDP segmentation offload are not implemented.

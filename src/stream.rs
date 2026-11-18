@@ -23,7 +23,7 @@ const RECEIVE_BUFFER: usize = 256 * 1024;
 
 const SEND_SEGMENTS: usize = 128;
 
-const SMALL_WRITE_DELAY: Duration = Duration::from_micros(2500);
+pub(crate) const SMALL_WRITE_DELAY: Duration = Duration::from_micros(2500);
 
 const SMALL_WRITE_THRESHOLD: usize = 256;
 
@@ -32,6 +32,27 @@ const OPEN: u8 = 0;
 const DATA: u8 = 1;
 
 const FIN: u8 = 2;
+
+/// Recognize outbound KCP datagrams containing only ACKs and stream FINs.
+pub(crate) fn is_ack_or_fin(mut packet: &[u8]) -> bool {
+    const PUSH: u8 = 81;
+    const ACK: u8 = 82;
+    while let Some((header, rest)) = packet.split_at_checked(kcp::KCP_OVERHEAD) {
+        let [a, b, c, d] = [header[20], header[21], header[22], header[23]];
+        let len = u32::from_le_bytes([a, b, c, d]) as usize;
+        let Some((data, remaining)) = rest.split_at_checked(len) else {
+            return false;
+        };
+        match (header[4], header[5], data) {
+            (ACK, 0, []) | (PUSH, 0, [FIN]) => packet = remaining,
+            _ => return false,
+        }
+        if packet.is_empty() {
+            return true;
+        }
+    }
+    false
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct Output(pub(crate) Arc<Mutex<VecDeque<Vec<u8>>>>);

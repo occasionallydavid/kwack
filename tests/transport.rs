@@ -674,7 +674,7 @@ async fn closing_retries_lost_close_and_ack_and_stops_server_udp() {
         let writer = tokio::spawn(async move { sending.write_all(&vec![0x42; 2 * 1024 * 1024]).await });
         tokio::time::sleep(Duration::from_millis(100)).await;
         closing.store(true, Ordering::SeqCst);
-        tokio::time::timeout(Duration::from_secs(2), client.close()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), client.connection().shutdown()).await.unwrap();
         assert_eq!(drops.load(Ordering::SeqCst), 2);
         assert!(writer.await.unwrap().is_err());
         connection.closed().await;

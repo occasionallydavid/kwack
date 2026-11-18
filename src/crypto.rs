@@ -62,6 +62,9 @@ pub(crate) const CLOSE: u8 = 4;
 
 pub(crate) const CLOSE_ACK: u8 = 7;
 
+// A session-wide end marker in the encrypted control byte.
+pub(crate) const DONE: u8 = 0x80;
+
 pub(crate) const PING: u8 = 5;
 
 pub(crate) const PONG: u8 = 6;

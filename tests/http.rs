@@ -404,6 +404,7 @@ async fn first_request_body_follows_noise_response_without_extra_roundtrips() {
         let relay = front.local_addr().unwrap();
         let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (first_packet, first_seen) = tokio::sync::oneshot::channel();
+        let (wire, mut observed) = tokio::sync::mpsc::unbounded_channel();
         let mut tasks = JoinSet::new();
         tasks.spawn(async move {
             let mut a = [0; 1500];
@@ -416,6 +417,7 @@ async fn first_request_body_follows_noise_response_without_extra_roundtrips() {
                     received = front.recv_from(&mut a) => {
                         let (len, source) = received.unwrap();
                         client = Some(source);
+                        wire.send((true, len)).unwrap();
                         if a[4] == 3 && let Some(first_packet) = first_packet.take() {
                             let _ = first_packet.send((len, server_packets));
                         }
@@ -424,13 +426,14 @@ async fn first_request_body_follows_noise_response_without_extra_roundtrips() {
                     received = back.recv_from(&mut b) => {
                         let (len, _) = received.unwrap();
                         server_packets += 1;
+                        wire.send((false, len)).unwrap();
                         if let Some(client) = client { front.send_to(&b[..len], client).await.unwrap(); }
                     }
                 }
             }
         });
         tasks.spawn(async move {
-            server.serve(Router::new().route("/echo", post(|body: Bytes| async move { body }))).await.unwrap();
+            server.serve(Router::new().route("/echo", post(|body: Bytes| async move { Bytes::from(body.repeat(4)) }))).await.unwrap();
         });
         let client = Client::builder(PrivateKey::from_bytes([221; 32])).remote(relay, public).connect().await.unwrap();
         let body = Bytes::from(vec![0x78; 319]);
@@ -447,13 +450,25 @@ async fn first_request_body_follows_noise_response_without_extra_roundtrips() {
             }
         });
         let response = client.send(request).await.unwrap();
-        assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), body);
+        assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), body.repeat(4));
         let (length, responses_before_data) = first_seen.await.unwrap();
         assert_eq!(responses_before_data, 1, "only the Noise response may precede the request");
         assert!(length >= 319 + 70, "the first KCP packet must include the body, not just OPEN or HTTP headers");
         assert_eq!(before.elapsed(), Duration::ZERO, "HTTP exchange waited for a transport timer");
+        client.close().await;
+        let mut reply_started = false;
+        loop {
+            match observed.recv().await.unwrap() {
+                (false, 1200) => reply_started = true,
+                (true, 46) if reply_started => break,
+                (true, size) if reply_started => panic!("extra client datagram after response: {size}"),
+                _ => {}
+            }
+        }
+        assert_eq!(before.elapsed(), Duration::ZERO, "close waited for an acknowledgment");
         clock_guard.abort();
         tokio::time::resume();
-        client.close().await;
-    }).await.expect("one-RTT startup test timed out");
+        assert!(tokio::time::timeout(Duration::from_millis(50), observed.recv()).await.is_err(),
+            "teardown produced another UDP datagram");
+    }).await.expect("one-RTT startup and one-way teardown test timed out");
 }
