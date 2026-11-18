@@ -1,24 +1,30 @@
+use std::collections::HashSet;
+
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::post;
-use kwack::Error;
-use kwack::server::PeerIdentity;
+use kwack::{Error, PeerAuthorizer, PeerIdentity};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: server PRIVATE_KEY BIND_ADDRESS CLIENT_PUBLIC_KEY [CLIENT_PUBLIC_KEY ...]";
+    let usage = "usage: server PRIVATE_KEY BIND_ADDRESS [CLIENT_PUBLIC_KEY ...]";
     let private_key = args.next().ok_or(usage)?;
     let address = args.next().ok_or(usage)?.parse()?;
-    let accepted_keys: Vec<_> = args.collect();
-    if accepted_keys.is_empty() {
-        return Err(usage.into());
-    }
+    let accepted_keys = args
+        .map(|key| PeerIdentity::from_public_key_base64(&key))
+        .collect::<Result<HashSet<_>, _>>()?;
+    let authorize_client: Option<PeerAuthorizer> = if accepted_keys.is_empty() {
+        None
+    } else {
+        Some(Box::new(move |peer| accepted_keys.contains(&peer)))
+    };
 
     let router = Router::new()
         .route("/echo", post(echo))
+        .route("/optional-echo", post(optional_echo))
         .layer(DefaultBodyLimit::max(1024));
-    let listener = kwack::server::serve(router, &private_key, &accepted_keys)?.bind(address)?;
+    let listener = kwack::server::serve(router, &private_key, authorize_client)?.bind(address)?;
     println!("listening on {}", listener.local_addr()?);
     listener.run().await;
     Ok(())
@@ -26,5 +32,13 @@ async fn main() -> Result<(), Error> {
 
 async fn echo(peer: PeerIdentity, body: String) -> String {
     eprintln!("request from {}", peer.public_key_base64());
+    body
+}
+
+async fn optional_echo(peer: Option<PeerIdentity>, body: String) -> String {
+    match peer {
+        Some(peer) => eprintln!("request from {}", peer.public_key_base64()),
+        None => eprintln!("anonymous request"),
+    }
     body
 }

@@ -1,13 +1,13 @@
-//! Serve a Tower service over HTTP/3 with an Ed25519 client allowlist.
+//! Serve a Tower service over HTTP/3 with optional Ed25519 client authorization.
 
+#[cfg(feature = "axum")]
+use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use bytes::{Buf, Bytes};
 use h3::error::{Code, StreamError};
 use h3::server::RequestStream;
@@ -20,45 +20,45 @@ use tokio::task::JoinSet;
 use tower::{Service, ServiceExt};
 use webpki::EndEntityCert;
 
-use crate::{Error, Identity, Verifier, invalid_cert, leaf_public_key};
+pub use crate::PeerIdentity;
+use crate::{Error, Identity, PeerAuthorizer, Verifier, invalid_cert};
 
-/// The authenticated client's Ed25519 public key in the HTTP request extensions.
-/// With the `axum` feature, handlers can take it as a direct extractor or
-/// as `axum::Extension<kwack::server::PeerIdentity>`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PeerIdentity([u8; 32]);
+#[cfg(feature = "axum")]
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerIdentity {
+    type Rejection = http::StatusCode;
 
-impl PeerIdentity {
-    /// Returns the raw Ed25519 public key.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// Returns the public key in the same format as a kwack allowlist entry.
-    pub fn public_key_base64(&self) -> String {
-        STANDARD.encode(self.0)
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .copied()
+            .ok_or(http::StatusCode::UNAUTHORIZED)
     }
 }
 
 #[cfg(feature = "axum")]
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerIdentity {
-    type Rejection = axum::extract::rejection::ExtensionRejection;
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for PeerIdentity {
+    type Rejection = Infallible;
 
     async fn from_request_parts(
         parts: &mut http::request::Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        let axum::Extension(peer) = axum::Extension::from_request_parts(parts, state).await?;
-        Ok(peer)
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(parts.extensions.get::<Self>().copied())
     }
 }
 
-/// Configures a Tower service for HTTP/3 mTLS. Call [`Server::bind`] with
+/// Configures a Tower service for HTTP/3. Call [`Server::bind`] with
 /// the UDP address, then [`Listener::run`] to begin accepting requests.
+/// With `None`, clients can connect anonymously or present a valid certificate.
+/// With a callback, clients must present a valid certificate with an admitted key.
 pub fn serve<S, B>(
     service: S,
     private_key: &str,
-    accepted_keys: &[impl AsRef<str>],
+    authorize_client: Option<PeerAuthorizer>,
 ) -> Result<Server<S>, Error>
 where
     S: Service<Request<RequestBody>, Response = Response<B>> + Clone + Send + 'static,
@@ -68,7 +68,8 @@ where
     B::Error: Into<Error>,
 {
     let (chain, key) = Identity::from_private_key(private_key)?.into_rustls();
-    let verifier = Arc::new(Verifier::new(accepted_keys)?);
+    let require_fresh_authorization = authorize_client.is_some();
+    let verifier = Arc::new(Verifier::new(authorize_client));
     let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -76,12 +77,15 @@ where
     .with_client_cert_verifier(verifier)
     .with_single_cert(chain, key)?;
     tls.alpn_protocols = vec![b"h3".to_vec()];
+    if require_fresh_authorization {
+        tls.send_tls13_tickets = 0;
+    }
 
     let config = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
     Ok(Server { service, config })
 }
 
-/// An HTTP/3 server configured with a Tower service and mTLS.
+/// An HTTP/3 server configured with a Tower service and TLS.
 pub struct Server<S> {
     service: S,
     config: quinn::ServerConfig,
@@ -146,21 +150,7 @@ where
     B::Error: Into<Error>,
 {
     let quic = incoming.await?;
-    let chain = quic
-        .peer_identity()
-        .and_then(|identity| identity.downcast::<Vec<CertificateDer<'static>>>().ok())
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::PermissionDenied, "missing TLS peer identity")
-        })?;
-    let [certificate] = chain.as_slice() else {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "expected one peer certificate",
-        )
-        .into());
-    };
-    let leaf = EndEntityCert::try_from(certificate).map_err(invalid_cert)?;
-    let identity = PeerIdentity(leaf_public_key(&leaf).map_err(rustls::Error::from)?);
+    let identity = peer_identity(&quic)?;
     let mut connection = h3::server::Connection::new(h3_quinn::Connection::new(quic)).await?;
     let mut requests = JoinSet::new();
     loop {
@@ -175,7 +165,9 @@ where
                             stream: recv,
                             receiving: Receiving::Data,
                         });
-                        request.extensions_mut().insert(identity);
+                        if let Some(identity) = identity {
+                            request.extensions_mut().insert(identity);
+                        }
                         if respond(service, request, &mut send).await.is_err() {
                             send.stop_stream(Code::H3_INTERNAL_ERROR);
                         }
@@ -187,6 +179,24 @@ where
     }
     while requests.join_next().await.is_some() {}
     Ok(())
+}
+
+fn peer_identity(quic: &quinn::Connection) -> Result<Option<PeerIdentity>, Error> {
+    let Some(identity) = quic.peer_identity() else {
+        return Ok(None);
+    };
+    let chain = identity
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "unexpected TLS peer identity"))?;
+    let [certificate] = chain.as_slice() else {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidData, "expected one peer certificate").into(),
+        );
+    };
+    let leaf = EndEntityCert::try_from(certificate).map_err(invalid_cert)?;
+    Ok(Some(
+        PeerIdentity::from_leaf(&leaf).map_err(rustls::Error::from)?,
+    ))
 }
 
 async fn respond<S, B>(

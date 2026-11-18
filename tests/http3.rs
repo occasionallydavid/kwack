@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kwack::Identity;
-use kwack::server::PeerIdentity;
+use kwack::{Identity, PeerAuthorizer, PeerIdentity};
 
 fn keys(seed: u8) -> (String, String) {
     let private = STANDARD.encode([seed; 32]);
@@ -13,6 +12,11 @@ fn keys(seed: u8) -> (String, String) {
         .unwrap()
         .public_key_base64();
     (private, public)
+}
+
+fn pin(key: &str) -> PeerAuthorizer {
+    let expected = PeerIdentity::from_public_key_base64(key).unwrap();
+    Box::new(move |peer| peer == expected)
 }
 
 #[tokio::test]
@@ -37,13 +41,13 @@ async fn tower_service_reads_authenticated_identity_from_request_extensions() {
                 .unwrap(),
         )
     });
-    let listener = kwack::server::serve(service, &server_key, &[&client_pin])
+    let listener = kwack::server::serve(service, &server_key, Some(pin(&client_pin)))
         .unwrap()
         .bind("127.0.0.1:0".parse().unwrap())
         .unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(listener.run());
-    let client = kwack::client::client_builder(&client_key, &[server_pin])
+    let client = kwack::client::client_builder(Some(&client_key), Some(pin(&server_pin)))
         .unwrap()
         .resolve("a", address)
         .timeout(Duration::from_secs(3))
@@ -68,6 +72,9 @@ async fn tower_service_reads_authenticated_identity_from_request_extensions() {
 #[cfg(feature = "axum")]
 #[tokio::test]
 async fn axum_extracts_the_authenticated_clients_key() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use axum::Router;
     use axum::routing::get;
 
@@ -79,14 +86,24 @@ async fn axum_extracts_the_authenticated_clients_key() {
         "/whoami",
         get(|peer: PeerIdentity| async move { peer.public_key_base64() }),
     );
-    let listener = kwack::server::serve(router, &server_key, &[&first_pin, &second_pin])
+    let first_identity = PeerIdentity::from_public_key_base64(&first_pin).unwrap();
+    let second_identity = PeerIdentity::from_public_key_base64(&second_pin).unwrap();
+    let admit_first = Arc::new(AtomicBool::new(true));
+    let policy = {
+        let admit_first = admit_first.clone();
+        move |peer| {
+            peer == second_identity
+                || (peer == first_identity && admit_first.load(Ordering::Relaxed))
+        }
+    };
+    let listener = kwack::server::serve(router, &server_key, Some(Box::new(policy)))
         .unwrap()
         .bind("127.0.0.1:0".parse().unwrap())
         .unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(listener.run());
     let make_client = |key: &str| {
-        kwack::client::client_builder(key, &[&server_pin])
+        kwack::client::client_builder(Some(key), Some(pin(&server_pin)))
             .unwrap()
             .resolve("a", address)
             .timeout(Duration::from_secs(3))
@@ -111,5 +128,65 @@ async fn axum_extracts_the_authenticated_clients_key() {
         assert_eq!(response.text().await.unwrap(), pin);
     }
     assert!(denied.is_err());
+    admit_first.store(false, Ordering::Relaxed);
+    assert!(request(make_client(&first_key)).await.is_err());
+    server.abort();
+}
+
+#[cfg(feature = "axum")]
+#[tokio::test]
+async fn open_server_supports_anonymous_and_identified_requests() {
+    use axum::Router;
+    use axum::routing::get;
+
+    let (server_key, server_pin) = keys(1);
+    let (client_key, client_pin) = keys(2);
+    let router = Router::new()
+        .route(
+            "/required",
+            get(|peer: PeerIdentity| async move { peer.public_key_base64() }),
+        )
+        .route(
+            "/optional",
+            get(|peer: Option<PeerIdentity>| async move {
+                peer.map_or_else(|| "anonymous".into(), |peer| peer.public_key_base64())
+            }),
+        );
+    let listener = kwack::server::serve(router, &server_key, None)
+        .unwrap()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(listener.run());
+    let make_client = |key: Option<&str>, authorizer| {
+        kwack::client::client_builder(key, authorizer)
+            .unwrap()
+            .resolve("a", address)
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap()
+    };
+    let anonymous = make_client(None, Some(pin(&server_pin)));
+    let identified = make_client(Some(&client_key), None);
+    let request = |client: &reqwest::Client, path: &str| {
+        client
+            .get(format!("https://a:{}/{path}", address.port()))
+            .version(reqwest::Version::HTTP_3)
+            .send()
+    };
+    let response = request(&anonymous, "required").await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    for (client, path, expected) in [
+        (&anonymous, "optional", "anonymous"),
+        (&identified, "optional", &client_pin),
+        (&identified, "required", &client_pin),
+    ] {
+        let response = request(client, path)
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), expected);
+    }
     server.abort();
 }

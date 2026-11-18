@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kwack::{Identity, Verifier};
+use kwack::{Identity, PeerIdentity, Verifier};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::server::danger::ClientCertVerifier;
@@ -27,7 +27,8 @@ fn deterministic_for_seed_and_pkcs8() {
 #[test]
 fn certificate_checks_reject_tampering_expiry_and_trailing_data() {
     let identity = identity(1);
-    let verifier = Verifier::new([identity.public_key_base64()]).unwrap();
+    let peer = PeerIdentity::from_public_key_base64(&identity.public_key_base64()).unwrap();
+    let verifier = Verifier::new(Some(Box::new(move |presented| presented == peer)));
     let (chain, _) = identity.into_rustls();
     let cert = &chain[0];
     assert!(
@@ -72,7 +73,7 @@ fn certificate_checks_reject_tampering_expiry_and_trailing_data() {
             .verify_client_cert(&CertificateDer::from(trailing), &[], UnixTime::now())
             .is_err()
     );
-    assert!(Verifier::new(["invalid"]).is_err());
+    assert!(PeerIdentity::from_public_key_base64("invalid").is_err());
 }
 
 #[tokio::test]
@@ -85,22 +86,28 @@ async fn quinn_mutual_tls_enforces_pins_in_both_directions() {
         (1, 2, Some(2), "b", false),
     ] {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client_pin =
+            PeerIdentity::from_public_key_base64(&identity(client_pin).public_key_base64())
+                .unwrap();
+        let server_pin =
+            PeerIdentity::from_public_key_base64(&identity(server_pin).public_key_base64())
+                .unwrap();
         let (server_chain, server_key) = identity(1).into_rustls();
         let server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
-            .with_client_cert_verifier(Arc::new(
-                Verifier::new([identity(client_pin).public_key_base64()]).unwrap(),
-            ))
+            .with_client_cert_verifier(Arc::new(Verifier::new(Some(Box::new(move |peer| {
+                peer == client_pin
+            })))))
             .with_single_cert(server_chain, server_key)
             .unwrap();
         let client_builder = rustls::ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(
-                Verifier::new([identity(server_pin).public_key_base64()]).unwrap(),
-            ));
+            .with_custom_certificate_verifier(Arc::new(Verifier::new(Some(Box::new(
+                move |peer| peer == server_pin,
+            )))));
         let client_tls = if let Some(seed) = client_identity {
             let (chain, key) = identity(seed).into_rustls();
             client_builder.with_client_auth_cert(chain, key).unwrap()
