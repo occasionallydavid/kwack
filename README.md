@@ -24,11 +24,27 @@ verifier and close any existing sessions for that key.
 
 ## Run the examples
 
-- `cargo run --example mtls` starts a client and server on loopback with freshly
-  generated keys, authenticates both peers with public-key pins, and sends a
-  message over a QUIC stream.
-- `cargo run --example keygen` prints a new base64 PKCS #8 private key and its
-  base64 public key. The first line is secret.
+The server takes a bind address and one or more allowed client public keys.
+The client takes the server address, its public-key pin, and an optional message
+to echo. Each reads its own private key from `KWACK_PRIVATE_KEY`.
+
+Run these commands in Bash to generate two key pairs and try the examples:
+
+```bash
+mapfile -t server_keys < <(cargo run --quiet --example keygen)
+mapfile -t client_keys < <(cargo run --quiet --example keygen)
+
+KWACK_PRIVATE_KEY="${server_keys[0]#private_key=}" \
+  cargo run --quiet --example server -- 127.0.0.1:4433 "${client_keys[1]#public_key=}" &
+server_pid=$!
+# Wait for the server to print its listening address before running the client.
+KWACK_PRIVATE_KEY="${client_keys[0]#private_key=}" \
+  cargo run --quiet --example client -- 127.0.0.1:4433 "${server_keys[1]#public_key=}"
+kill "$server_pid"
+```
+
+`keygen` prints a base64 PKCS #8 private key and a base64 public key.
+The first line is secret.
 
 ## Use with rustls
 
