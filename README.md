@@ -27,8 +27,8 @@ verifier and close any existing sessions for that key.
 - `cargo run --example mtls` starts a client and server on loopback with freshly
   generated keys, authenticates both peers with public-key pins, and sends a
   message over a QUIC stream.
-- `cargo run --example keygen` prints a new base64 PKCS #8 private key, its raw
-  public key, and its certificate. The first line is secret.
+- `cargo run --example keygen` prints a new base64 PKCS #8 private key and its
+  base64 public key. The first line is secret.
 
 ## Use with rustls
 

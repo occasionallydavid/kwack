@@ -8,6 +8,5 @@ fn main() -> Result<(), Error> {
     let identity = Identity::from_private_key(&private_key)?;
     println!("private_key={private_key}");
     println!("public_key={}", identity.public_key_base64());
-    println!("certificate={}", identity.certificate_base64());
     Ok(())
 }
