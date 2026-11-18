@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kwack::{Error, Identity, Verifier};
-use quinn::crypto::rustls::QuicClientConfig;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -30,24 +29,25 @@ async fn exchange() -> Result<(), Error> {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Verifier::new([server_public])?))
         .with_client_auth_cert(chain, key)?;
-    tls.alpn_protocols = vec![b"kwack-example".to_vec()];
+    tls.alpn_protocols = vec![b"h3".to_vec()];
 
-    let bind = if server.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let mut endpoint = quinn::Endpoint::client(bind.parse()?)?;
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(tls)?,
-    )));
-    let connection = endpoint.connect(server, "a")?.await?;
-    let (mut send, mut recv) = connection.open_bi().await?;
-    send.write_all(message.as_bytes()).await?;
-    send.finish()?;
-    let reply = recv.read_to_end(1024).await?;
-    println!("{}", String::from_utf8(reply)?);
-    connection.close(0u32.into(), b"done");
-    endpoint.wait_idle().await;
+    // Resolve the certificate's DNS name to the user-supplied UDP endpoint.
+    let client = reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .http3_prior_knowledge()
+        .no_proxy()
+        .resolve("a", server)
+        .build()?;
+    let reply = client
+        .post(format!("https://a:{}/echo", server.port()))
+        .version(reqwest::Version::HTTP_3)
+        .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(message)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    println!("{reply}");
     Ok(())
 }

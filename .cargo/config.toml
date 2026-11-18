@@ -1,0 +1,3 @@
+[build]
+# reqwest's HTTP/3 client is opt-in even when its Cargo feature is enabled.
+rustflags = ["--cfg", "reqwest_unstable"]

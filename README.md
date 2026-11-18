@@ -24,9 +24,14 @@ verifier and close any existing sessions for that key.
 
 ## Run the examples
 
-The server takes a bind address and one or more allowed client public keys.
-The client takes the server address, its public-key pin, and an optional message
-to echo. Each reads its own private key from `KWACK_PRIVATE_KEY`.
+The Axum server takes a UDP bind address and one or more allowed client public
+keys. The reqwest client takes the server address, its public-key pin, and an
+optional message to send to `POST /echo` over HTTP/3. Each reads its private
+key from `KWACK_PRIVATE_KEY`.
+
+The repository's Cargo config enables reqwest's required `reqwest_unstable`
+flag for HTTP/3. If you set your own `RUSTFLAGS`, include
+`--cfg reqwest_unstable` when building the examples.
 
 Run these commands in Bash to generate two key pairs and try the examples:
 

@@ -1,7 +1,9 @@
+use std::env;
 use std::sync::Arc;
-use std::time::Duration;
-use std::{env, io};
 
+use axum::Router;
+use axum::extract::DefaultBodyLimit;
+use axum::routing::post;
 use kwack::{Error, Identity, Verifier};
 use quinn::crypto::rustls::QuicServerConfig;
 
@@ -21,29 +23,32 @@ async fn main() -> Result<(), Error> {
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(Verifier::new(allowed_clients)?))
         .with_single_cert(chain, key)?;
-    tls.alpn_protocols = vec![b"kwack-example".to_vec()];
+    tls.alpn_protocols = vec![b"h3".to_vec()];
 
     let config = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
     let endpoint = quinn::Endpoint::server(config, bind)?;
+    let app = Router::new()
+        .route("/echo", post(echo))
+        .layer(DefaultBodyLimit::max(1024));
+
     println!("listening on {}", endpoint.local_addr()?);
     while let Some(incoming) = endpoint.accept().await {
-        match tokio::time::timeout(Duration::from_secs(5), echo(incoming)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => eprintln!("connection failed: {error}"),
-            Err(_) => eprintln!("connection timed out"),
-        }
+        let app = app.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve(app, incoming).await {
+                eprintln!("connection failed: {error}");
+            }
+        });
     }
     Ok(())
 }
 
-async fn echo(incoming: quinn::Incoming) -> Result<(), Error> {
-    let connection = incoming.await?;
-    let (mut send, mut recv) = connection.accept_bi().await?;
-    let message = recv.read_to_end(1024).await?;
-    send.write_all(&message).await?;
-    send.finish()?;
-    if send.stopped().await?.is_some() {
-        return Err(io::Error::new(io::ErrorKind::BrokenPipe, "client stopped reading").into());
-    }
-    Ok(())
+async fn serve(app: Router, incoming: quinn::Incoming) -> Result<(), Error> {
+    let quic = incoming.await?;
+    let connection = h3::server::Connection::new(h3_quinn::Connection::new(quic)).await?;
+    h3_axum::serve_h3_connection_with_axum(app, connection).await
+}
+
+async fn echo(body: String) -> String {
+    body
 }
