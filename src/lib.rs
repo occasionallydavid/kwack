@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use std::fmt;
+use std::{fmt, io};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -34,15 +34,17 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Accepts standard base64 containing a 32-byte Ed25519 seed or PKCS #8 DER.
+    /// Accepts the standard padded base64 encoding of a 32-byte Ed25519 seed.
     pub fn from_private_key(private_key: &str) -> Result<Self, Error> {
         let decoded = STANDARD.decode(private_key.trim())?;
-        let key = if decoded.len() == 32 {
-            [PKCS8_SEED_PREFIX, &decoded].concat()
-        } else {
-            decoded
-        };
-        let private_key = PrivatePkcs8KeyDer::from(key);
+        if decoded.len() != 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a base64-encoded 32-byte Ed25519 seed",
+            )
+            .into());
+        }
+        let private_key = PrivatePkcs8KeyDer::from([PKCS8_SEED_PREFIX, &decoded].concat());
         let signer = KeyPair::from_pkcs8_der_and_sign_algo(&private_key, &PKCS_ED25519)?;
         let public_key = signer.public_key_raw().try_into()?;
         let mut params = CertificateParams::new(vec!["a".into()])?;

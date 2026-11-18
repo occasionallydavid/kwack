@@ -9,7 +9,7 @@ of the public keys it should accept. Kwack makes those keys work with mutual
 TLS:
 
 - `Identity` takes a base64 Ed25519 private key and generates a deterministic
-  self-signed X.509 certificate. It accepts a raw 32-byte seed or PKCS #8 DER.
+  self-signed X.509 certificate. The private key is a 32-byte seed.
 - `Verifier` plugs into rustls on either side of the handshake. A peer gets
   in when its key passes your admission policy and it proves it holds the
   private key.
@@ -20,7 +20,8 @@ TLS:
 
 ## Certificate and key formats
 
-Use standard padded base64. Ed25519 is a signing key format and is distinct
+Use standard padded base64 for the 32-byte private seed and 32-byte public key.
+Ed25519 is a signing key format and is distinct
 from the X25519 keys used by WireGuard. `PublicKey::raw()` returns the
 32-byte Ed25519 key, and `PublicKey::encoded()` returns its base64 string.
 

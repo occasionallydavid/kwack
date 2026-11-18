@@ -9,31 +9,32 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use kwack::{Error, Identity, Verifier};
-use rcgen::{KeyPair, PKCS_ED25519};
+
+mod support;
 
 fn main() -> Result<(), Error> {
-    let client = KeyPair::generate_for(&PKCS_ED25519)?;
-    let server = KeyPair::generate_for(&PKCS_ED25519)?;
+    let mut seeds = [0; 64];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut seeds)
+        .map_err(|_| std::io::Error::other("could not generate Ed25519 seeds"))?;
+    let client = Identity::from_private_key(&STANDARD.encode(&seeds[..32]))?;
+    let server = Identity::from_private_key(&STANDARD.encode(&seeds[32..]))?;
 
-    let (_client, _server) = tls_configs(
-        &STANDARD.encode(client.serialize_der()),
-        &STANDARD.encode(server.serialize_der()),
-        client.public_key_raw().try_into()?,
-        server.public_key_raw().try_into()?,
-    )?;
+    let (_client, _server) = tls_configs(client, server)?;
     println!("Built rustls client and server configurations for mutual TLS.");
     Ok(())
 }
 
 fn tls_configs(
-    client_private: &str,
-    server_private: &str,
-    allowed_client: [u8; 32],
-    allowed_server: [u8; 32],
+    client: Identity,
+    server: Identity,
 ) -> Result<(rustls::ClientConfig, rustls::ServerConfig), Error> {
+    let allowed_client = support::parse_public_key(&client.public_key_base64())?;
+    let allowed_server = support::parse_public_key(&server.public_key_base64())?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let (client_chain, client_key) = Identity::from_private_key(client_private)?.into_rustls();
-    let (server_chain, server_key) = Identity::from_private_key(server_private)?.into_rustls();
+    let (client_chain, client_key) = client.into_rustls();
+    let (server_chain, server_key) = server.into_rustls();
 
     let mut client = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?

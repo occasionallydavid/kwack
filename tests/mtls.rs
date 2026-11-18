@@ -21,14 +21,18 @@ fn raw_key(identity: &Identity) -> [u8; 32] {
 }
 
 #[test]
-fn deterministic_for_seed_and_pkcs8() {
+fn deterministic_for_seed_and_rejects_der_input() {
     let from_seed = identity(3);
     let certificate = from_seed.certificate_base64();
     assert_eq!(STANDARD.decode(&certificate).unwrap().len(), 217);
     let (_, pkcs8) = from_seed.into_rustls();
-    let from_pkcs8 = Identity::from_private_key(&STANDARD.encode(pkcs8.secret_der())).unwrap();
-    assert_eq!(certificate, from_pkcs8.certificate_base64());
+    let generated = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    assert_eq!(certificate, identity(3).certificate_base64());
     assert_ne!(certificate, identity(2).certificate_base64());
+    assert!(Identity::from_private_key(&STANDARD.encode(pkcs8.secret_der())).is_err());
+    assert!(Identity::from_private_key(&STANDARD.encode(generated.serialized_der())).is_err());
+    assert!(Identity::from_private_key(&STANDARD.encode([3; 31])).is_err());
+    assert!(Identity::from_private_key(&STANDARD.encode([3; 33])).is_err());
     assert!(Identity::from_private_key("invalid").is_err());
 }
 
