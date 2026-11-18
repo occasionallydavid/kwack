@@ -17,7 +17,7 @@ async fn main() -> Result<(), Error> {
         return Err(usage.into());
     }
 
-    let client = kwack::reqwest::client_builder(&private_key, &[server_public])?
+    let client = kwack::client::client_builder(&private_key, &[server_public])?
         .resolve("a", server)
         .timeout(Duration::from_secs(5))
         .build()?;

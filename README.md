@@ -1,6 +1,6 @@
 # kwack
 
-Ed25519 mutual TLS helpers for rustls, with optional HTTP/3 integrations for Axum and reqwest.
+Ed25519 mutual TLS helpers for rustls, with optional HTTP/3 helpers for Tower services and reqwest.
 
 - `Identity` takes a base64 Ed25519 private key and generates a deterministic
   self-signed X.509 certificate. It accepts a raw 32-byte seed or PKCS #8 DER.
@@ -24,15 +24,21 @@ verifier and close any existing sessions for that key.
 
 ## Optional HTTP/3 helpers
 
-Enable the `reqwest` feature for `kwack::reqwest::client(private_key, accepted_keys)`.
+Enable the `reqwest` feature for `kwack::client::client(private_key, accepted_keys)`.
 It returns a reqwest client with the server allowlist installed. Select HTTP/3 with
 `.version(reqwest::Version::HTTP_3)` on the request. The `client_builder` variant
 lets you set a timeout or map the generated server name `a` to a socket address.
 
-Enable the `axum` feature for
-`kwack::axum::serve(router, private_key, accepted_keys)?.bind(addr)?.run().await`.
-Handlers can extract `axum::Extension<kwack::axum::PeerIdentity>` to get the
-authenticated client key as raw bytes or base64.
+Enable `server` for
+`kwack::server::serve(service, private_key, accepted_keys)?.bind(addr)?.run().await`.
+Pass a Tower service that accepts `http::Request<kwack::server::RequestBody>`
+and returns an HTTP response with a byte body. Each request carries the
+authenticated client key in `request.extensions().get::<PeerIdentity>()`.
+
+The `axum` feature implies `server` and adds a direct `PeerIdentity` extractor
+for Axum handlers. An Axum router is a Tower service, so the same `serve`
+function accepts it. Handlers can take `peer: kwack::server::PeerIdentity`
+or use `axum::Extension<kwack::server::PeerIdentity>`.
 
 Reqwest requires the compiler flag `--cfg reqwest_unstable` for HTTP/3.
 This repository sets it in `.cargo/config.toml`. Set it in your application's
@@ -43,17 +49,18 @@ Cargo config or `RUSTFLAGS` when enabling kwack's `reqwest` feature.
 The server takes a private key, a UDP bind address, and one or more accepted
 client public keys. The client takes a private key, a server address, the
 server's public key, and an optional message to send to `POST /echo`.
+`keygen` prints `PRIVATE_KEY="..."` and `PUBLIC_KEY="..."` with base64 values.
 
 ```bash
-mapfile -t server_keys < <(cargo run --quiet --example keygen)
-mapfile -t client_keys < <(cargo run --quiet --example keygen)
+mapfile -t server_keys < <(cargo run --quiet --example keygen | cut -d '"' -f 2)
+mapfile -t client_keys < <(cargo run --quiet --example keygen | cut -d '"' -f 2)
 
 cargo run --quiet --features axum --example server -- \
-  "${server_keys[0]#private_key=}" 127.0.0.1:4433 "${client_keys[1]#public_key=}" &
+  "${server_keys[0]}" 127.0.0.1:4433 "${client_keys[1]}" &
 server_pid=$!
 # Wait for the server to print its listening address before running the client.
 cargo run --quiet --features reqwest --example client -- \
-  "${client_keys[0]#private_key=}" 127.0.0.1:4433 "${server_keys[1]#public_key=}"
+  "${client_keys[0]}" 127.0.0.1:4433 "${server_keys[1]}"
 kill "$server_pid"
 ```
 

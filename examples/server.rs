@@ -1,8 +1,8 @@
+use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::post;
-use axum::{Extension, Router};
 use kwack::Error;
-use kwack::axum::PeerIdentity;
+use kwack::server::PeerIdentity;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -18,13 +18,13 @@ async fn main() -> Result<(), Error> {
     let router = Router::new()
         .route("/echo", post(echo))
         .layer(DefaultBodyLimit::max(1024));
-    let listener = kwack::axum::serve(router, &private_key, &accepted_keys)?.bind(address)?;
+    let listener = kwack::server::serve(router, &private_key, &accepted_keys)?.bind(address)?;
     println!("listening on {}", listener.local_addr()?);
     listener.run().await;
     Ok(())
 }
 
-async fn echo(Extension(peer): Extension<PeerIdentity>, body: String) -> String {
+async fn echo(peer: PeerIdentity, body: String) -> String {
     eprintln!("request from {}", peer.public_key_base64());
     body
 }

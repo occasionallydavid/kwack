@@ -13,11 +13,11 @@ use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName as Name,
 use webpki::ring::ED25519;
 use webpki::{EndEntityCert, KeyUsage, anchor_from_trusted_cert};
 
-#[cfg(feature = "axum")]
-pub mod axum;
-
 #[cfg(feature = "reqwest")]
-pub mod reqwest;
+pub mod client;
+
+#[cfg(feature = "server")]
+pub mod server;
 
 /// An invalid key, base64 value, or certificate generation error.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

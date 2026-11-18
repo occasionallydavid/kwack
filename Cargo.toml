@@ -19,14 +19,23 @@ webpki = { package = "rustls-webpki", version = "0.103", default-features = fals
 
 axum = { version = "0.8", default-features = false, optional = true }
 h3 = { version = "0.0.8", default-features = false, optional = true }
-h3-axum = { version = "0.3.1", default-features = false, optional = true }
 h3-quinn = { version = "0.0.10", default-features = false, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["http3"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
 tokio = { version = "1", default-features = false, features = ["rt", "macros"], optional = true }
 
+bytes = { version = "1", default-features = false, optional = true }
+http = { version = "1", default-features = false, optional = true }
+http-body = { version = "1", default-features = false, optional = true }
+http-body-util = { version = "0.1", default-features = false, optional = true }
+tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
+
 [features]
-axum = ["dep:axum", "dep:h3", "dep:h3-axum", "dep:h3-quinn", "dep:quinn", "dep:tokio", "rustls/ring"]
+server = [
+    "dep:bytes", "dep:h3", "dep:h3-quinn", "dep:http", "dep:http-body",
+    "dep:http-body-util", "dep:quinn", "dep:tokio", "dep:tower", "rustls/ring",
+]
+axum = ["server", "dep:axum"]
 reqwest = ["dep:reqwest", "rustls/ring"]
 
 [profile.production]
