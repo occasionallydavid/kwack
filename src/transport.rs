@@ -335,6 +335,7 @@ impl Drop for Network {
 /// Server admission policy. Without an authorization callback, every client is denied.
 pub struct ServerBuilder {
     private: PrivateKey,
+    public: PublicKey,
     psk: [u8; 32],
     authorize: Authorize,
 }
@@ -368,6 +369,7 @@ pub struct Server {
 impl Server {
     pub fn builder(private: PrivateKey) -> ServerBuilder {
         ServerBuilder {
+            public: private.public_key(),
             private,
             psk: [0; 32],
             authorize: Box::new(|_| false),
@@ -725,7 +727,7 @@ impl Driver {
         let Some(config) = &mut self.config else {
             return;
         };
-        if !crypto::verify_gate(config.private.public_key(), packet) {
+        if !crypto::verify_gate(config.public, packet) {
             self.reject(packet, source, RejectionReason::AuthenticationFailed);
             return;
         }

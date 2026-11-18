@@ -3,7 +3,7 @@ use std::io;
 
 use blake2::digest::{KeyInit, Mac};
 use blake2::{Blake2s256, Blake2sMac, Digest};
-use noise_protocol::{Cipher, CipherState, HandshakeState, U8Array};
+use noise_protocol::{Cipher, CipherState, DH, HandshakeState, U8Array};
 use noise_rust_crypto::sensitive::Sensitive;
 use noise_rust_crypto::{Blake2s, ChaCha20Poly1305, X25519};
 use subtle::ConstantTimeEq;
@@ -12,7 +12,35 @@ use crate::{Error, PrivateKey, PublicKey};
 
 pub(crate) type SessionId = [u8; 16];
 
-pub(crate) type Initiation = HandshakeState<X25519, ChaCha20Poly1305, Blake2s>;
+pub(crate) type Initiation = HandshakeState<CheckedX25519, ChaCha20Poly1305, Blake2s>;
+
+pub(crate) enum CheckedX25519 {}
+
+impl DH for CheckedX25519 {
+    type Key = <X25519 as DH>::Key;
+    type Pubkey = <X25519 as DH>::Pubkey;
+    type Output = <X25519 as DH>::Output;
+
+    fn name() -> &'static str {
+        X25519::name()
+    }
+
+    fn genkey() -> Self::Key {
+        X25519::genkey()
+    }
+
+    fn pubkey(key: &Self::Key) -> Self::Pubkey {
+        X25519::pubkey(key)
+    }
+
+    fn dh(key: &Self::Key, peer: &Self::Pubkey) -> Result<Self::Output, ()> {
+        let shared = X25519::dh(key, peer)?;
+        if bool::from(shared.as_slice().ct_eq(&[0; 32])) {
+            return Err(());
+        }
+        Ok(shared)
+    }
+}
 
 pub(crate) const MAGIC: &[u8; 4] = b"KW\x01\x00";
 
@@ -299,6 +327,17 @@ impl DatagramCrypto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x25519_rejects_all_zero_shared_secrets() {
+        let local = CheckedX25519::genkey();
+        let peer = CheckedX25519::genkey();
+        assert!(CheckedX25519::dh(&local, &CheckedX25519::pubkey(&peer)).is_ok());
+        assert!(CheckedX25519::dh(&local, &[0; 32]).is_err());
+        let mut low_order = [0; 32];
+        low_order[0] = 1;
+        assert!(CheckedX25519::dh(&local, &low_order).is_err());
+    }
 
     #[test]
     fn datagrams_allow_loss_and_reordering_but_reject_replays_and_forgery() {
