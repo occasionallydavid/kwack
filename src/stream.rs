@@ -72,8 +72,9 @@ impl Conversation {
         // KcpStream concatenates DATA records into a byte stream.
         let mut kcp = Kcp::new(id, output.clone());
         kcp.set_mtu(crate::crypto::MTU - crate::crypto::DATA_HEADER - 16 - 1)?;
-        kcp.set_wndsize(128, 128);
-        kcp.set_nodelay(true, 10, 2, false); // retain KCP congestion control
+        // With congestion control disabled, the send window bounds each burst.
+        kcp.set_wndsize(8, 128);
+        kcp.set_nodelay(true, 10, 2, true); // allow multiple segments in the first flight
         kcp.set_maximum_resend_times(40);
         Ok(Self {
             kcp,
@@ -330,5 +331,22 @@ impl AsyncWrite for KcpStream {
             self.notify_io(&mut state);
         }
         Poll::Ready(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_flight_sends_two_segments_without_an_ack() {
+        let mut conversation = Conversation::new(1, true).unwrap();
+        let mut record = vec![0; conversation.kcp.mss() + 1];
+        record[0] = OPEN;
+        conversation.kcp.send(&record).unwrap();
+        conversation.kcp.update(0).unwrap();
+        conversation.kcp.flush().unwrap();
+
+        assert_eq!(conversation.output.0.lock().len(), 2);
     }
 }

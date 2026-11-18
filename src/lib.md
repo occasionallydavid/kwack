@@ -160,9 +160,10 @@ peer's UDP address, permitting roaming.
 Outer UDP payloads are capped at 1,200 bytes, including the 29-byte header and
 16-byte authentication tag. There is no synthetic IP/UDP framing. The KCP MTU is
 1,154 bytes, leaving one encrypted byte for the packet subtype. Each conversation
-has 128-segment send/receive windows and a bounded application receive queue of
+has an 8-segment send window, a 128-segment receive window, and a bounded application receive queue of
 approximately 256 KiB. Application writes are chunked at 16 KiB; the send queue
-applies backpressure at 128 segments. Congestion control remains enabled.
+applies backpressure at 128 segments. KCP congestion control is disabled, so
+the sender can fill the available flow-control window from the first flight.
 
 A session permits 128 active/draining conversations. Opening another at capacity
 returns `WouldBlock`. Closed conversation IDs are not reused; retired IDs use a
