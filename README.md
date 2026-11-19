@@ -21,9 +21,9 @@ TLS:
 ## Certificate and key formats
 
 Use standard padded base64 for the 32-byte private seed and 32-byte public key.
-Ed25519 is a signing key format and is distinct
-from the X25519 keys used by WireGuard. `PublicKey::raw()` returns the
-32-byte Ed25519 key, and `PublicKey::encoded()` returns its base64 string.
+Kwack uses Ed25519 for digital signatures. WireGuard uses X25519 for key
+agreement. `PublicKey::raw()` returns the 32-byte Ed25519 key, and
+`PublicKey::encoded()` returns its base64 string.
 
 The generated certificate has DNS name `a` and fixed validity from
 2000-01-01 to 2049-01-01 UTC. The same key produces the same certificate with
